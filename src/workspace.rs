@@ -89,11 +89,10 @@ impl Workspace {
         std::fs::create_dir_all(&data).with_context(|| format!("creating {}", data.display()))?;
         let data = std::fs::canonicalize(&data)?;
 
-        if let Some(cur) = self.app() {
-            if cur.layout.repo == repo && cur.layout.data == data {
+        if let Some(cur) = self.app()
+            && cur.layout.repo == repo && cur.layout.data == data {
                 return Ok(());
             }
-        }
         git::exclude_path(&repo, &data).await?;
         let app = App::new(Layout { repo: repo.clone(), data: data.clone() }, self.claude.clone(), self.events.clone())?;
 

@@ -48,11 +48,10 @@ async fn main() -> Result<()> {
         Some(repo) => Some((repo, args.data)),
         None => ws.recent().into_iter().next().map(|r| (r.repo, Some(r.data))),
     };
-    if let Some((repo, data)) = initial {
-        if let Err(e) = ws.open(&repo, data.as_deref()).await {
+    if let Some((repo, data)) = initial
+        && let Err(e) = ws.open(&repo, data.as_deref()).await {
             tracing::warn!("could not open {}: {e:#}; pick a repository in the web UI", repo.display());
         }
-    }
 
     let addr = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.with_context(|| format!("binding {addr}"))?;
