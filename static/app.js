@@ -3,7 +3,11 @@
 // ---- State ---------------------------------------------------------------
 
 const S = {
-  repo: "",
+  repo: null,
+  data: null,
+  defaultData: null,
+  recent: [],
+  home: "",
   pipeline: null,
   items: new Map(),
   insp: null, // { id, run, tab, data, file }
@@ -13,6 +17,7 @@ const $ = (sel) => document.querySelector(sel);
 
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
+  if (tag === "button" && !("type" in attrs)) el.type = "button";
   for (const [k, v] of Object.entries(attrs)) {
     if (v == null || v === false) continue;
     if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
@@ -30,7 +35,8 @@ function h(tag, attrs = {}, ...children) {
 async function api(method, path, body) {
   const res = await fetch(path, {
     method,
-    headers: body ? { "content-type": "application/json" } : {},
+    // The server rejects changes without this header (see web::guard).
+    headers: { "x-claudechain": "1", ...(body ? { "content-type": "application/json" } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
@@ -80,9 +86,26 @@ const STATUS_LABEL = {
 async function load() {
   const st = await api("GET", "/api/state");
   S.repo = st.repo;
-  S.pipeline = st.pipeline;
-  S.items = new Map(st.items.map((i) => [i.id, i]));
-  $("#repo").textContent = st.repo;
+  S.data = st.data ?? null;
+  S.defaultData = st.default_data ?? null;
+  S.recent = st.recent || [];
+  S.home = st.home;
+  S.pipeline = st.pipeline ?? null;
+  S.items = new Map((st.items || []).map((i) => [i.id, i]));
+  $("#repo-path").textContent = st.repo ?? "no repository";
+  $("#repo").title = st.repo ? `Repository ${st.repo}\nData ${st.data}\n\nClick to open another repository` : "Open a repository";
+  for (const id of ["#btn-general", "#btn-pipeline", "#btn-add"]) $(id).disabled = !st.repo;
+  $("#no-repo").hidden = !!st.repo;
+  if (!st.repo) {
+    $("#board").replaceChildren();
+    $("#empty").hidden = true;
+    closeInspector();
+    if (!$("#dialog").open && !load.prompted) {
+      load.prompted = true;
+      workspaceDialog();
+    }
+    return;
+  }
   renderBoard();
   if (S.insp) renderInspector();
 }
@@ -106,6 +129,10 @@ function connect() {
         S.items.delete(ev.id);
         scheduleBoard();
         if (S.insp?.id === ev.id) closeInspector();
+        break;
+      case "workspace":
+        closeInspector();
+        load();
         break;
       case "pipeline":
       case "resync":
@@ -135,6 +162,7 @@ function scheduleBoard() {
 
 function renderBoard() {
   const p = S.pipeline;
+  if (!p) return;
   const board = $("#board");
   const items = [...S.items.values()].sort((a, b) => a.created.localeCompare(b.created));
   $("#empty").hidden = items.length > 0;
@@ -144,7 +172,8 @@ function renderBoard() {
 
   const head = h("tr", {},
     h("th", { class: "corner" }, `${items.length} item${items.length === 1 ? "" : "s"}`,
-      h("div", {}, `max ${p.max_iterations} bounces per item`)),
+      h("div", {}, `max ${p.max_iterations} bounces per item`),
+      h("button", { class: "small", style: "margin-top:6px", onclick: pipelineDialog }, "Edit pipeline…")),
     p.steps.map((s) => stepHeader(s, busy[s.id] || 0)),
   );
   const rows = items.map((it) => h("tr", {},
@@ -547,8 +576,9 @@ async function renderDiff(body) {
 // ---- Dialogs -------------------------------------------------------------
 
 /// Opens the shared dialog; `onOk` returns false/throws to keep it open.
-function dialog(title, content, onOk, okLabel = "Save") {
+function dialog(title, content, onOk, okLabel = "Save", wide = false) {
   const dlg = $("#dialog");
+  dlg.classList.toggle("wide", wide);
   $("#dialog-title").textContent = title;
   $("#dialog-body").replaceChildren(...content);
   $("#dialog-error").textContent = "";
@@ -590,13 +620,194 @@ function addDialog() {
   setTimeout(() => ta.focus(), 0);
 }
 
-function settingsDialog() {
-  const input = h("input", { type: "number", min: 0, max: 100, value: S.pipeline.max_iterations });
-  dialog("Settings", [
-    h("label", {}, "Maximum backward moves per item before asking a human"),
-    input,
-    h("p", { class: "help" }, "Steps, tools and allowed transitions are configured in pipeline.toml in the data directory (restart to apply)."),
-  ], () => api("PUT", "/api/settings", { max_iterations: parseInt(input.value, 10) || 0 }));
+// Workspace ----------------------------------------------------------------
+
+/// Folder picker backed by the server's /api/fs listing.
+function folderBrowser(onPick) {
+  const head = h("div", { class: "browser-head" });
+  const list = h("ul", {});
+  const el = h("div", { class: "browser" }, head, list);
+  let hidden = false;
+  let current = "";
+  const go = async (path) => {
+    let res;
+    try {
+      res = await api("GET", `/api/fs?path=${encodeURIComponent(path || "")}&hidden=${hidden}`);
+    } catch (e) {
+      $("#dialog-error").textContent = e.message;
+      return;
+    }
+    $("#dialog-error").textContent = "";
+    current = res.path;
+    head.replaceChildren(
+      h("button", { class: "small", disabled: !res.parent, onclick: () => go(res.parent), title: "Parent folder" }, "↑"),
+      h("button", { class: "small", onclick: () => go(""), title: "Home folder" }, "⌂"),
+      h("span", { class: "cur", title: res.path }, res.path, res.git ? " " : "", res.git ? h("span", { class: "badge" }, "git") : ""),
+      h("label", { style: "margin:0;display:inline-flex;gap:4px;align-items:center" },
+        h("input", { type: "checkbox", checked: hidden, onchange: (e) => { hidden = e.target.checked; go(current); } }), "hidden"),
+      h("button", { class: "small primary", onclick: () => onPick(res.path) }, "Use this folder"),
+    );
+    list.replaceChildren(...(res.entries.length ? res.entries : [{ name: "(no subfolders)", path: null }]).map((e) =>
+      h("li", { onclick: () => e.path && go(e.path), ondblclick: () => e.path && onPick(e.path) },
+        h("span", {}, e.path ? "📁 " : "", e.name), e.git ? h("span", { class: "badge" }, "git") : "")));
+  };
+  return { el, go };
+}
+
+function workspaceDialog() {
+  const repo = h("input", { type: "text", value: S.repo ?? "", placeholder: "/path/to/your/repository" });
+  const data = h("input", { type: "text", value: S.data && S.data !== S.defaultData ? S.data : "" });
+  const updatePlaceholder = () => (data.placeholder = repo.value.trim() ? `default: ${repo.value.trim().replace(/\/$/, "")}/.claudechain` : "default: <repository>/.claudechain");
+  repo.oninput = updatePlaceholder;
+  updatePlaceholder();
+  let target = repo;
+  const browser = folderBrowser((path) => {
+    target.value = path;
+    updatePlaceholder();
+  });
+  const browse = (input) => h("button", { onclick: () => { target = input; browser.go(input.value.trim() || (input === data ? repo.value.trim() : "")); } }, "Browse…");
+  const recent = S.recent.length
+    ? h("div", {}, h("label", {}, "Recent"), h("div", { class: "recent" }, S.recent.map((r) =>
+        h("button", { onclick: () => { repo.value = r.repo; data.value = r.data === `${r.repo}/.claudechain` ? "" : r.data; updatePlaceholder(); } },
+          r.repo, h("small", {}, `data: ${r.data}`)))))
+    : "";
+  dialog("Open repository", [
+    h("p", { class: "help" }, "ClaudeChain works on one git repository at a time. Its pipeline, prompts, work items and worktrees are kept in the data directory, so each repository keeps its own setup. Switching is only possible while no agents are running."),
+    recent,
+    h("label", {}, "Repository"), h("div", { class: "field" }, repo, browse(repo)),
+    h("label", {}, "Data directory (optional)"), h("div", { class: "field" }, data, browse(data)),
+    browser.el,
+  ], () => api("POST", "/api/workspace", { repo: repo.value, data: data.value || null }), "Open", true);
+  browser.go(S.repo ? S.repo.replace(/\/[^/]+\/?$/, "") || "/" : "");
+}
+
+// Pipeline editor ----------------------------------------------------------
+
+const KNOWN_TOOLS = ["Read", "Grep", "Glob", "Edit", "Write", "Bash", "WebFetch", "WebSearch", "NotebookEdit", "TodoWrite", "Agent"];
+const PERMISSION_MODES = ["dontAsk", "acceptEdits", "bypassPermissions", "auto", "plan"];
+
+function slug(name) {
+  return name.toLowerCase().trim().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "step";
+}
+
+function pipelineDialog() {
+  const draft = structuredClone({
+    max_iterations: S.pipeline.max_iterations,
+    models: S.pipeline.models,
+    steps: S.pipeline.steps,
+  });
+  const body = h("div", {});
+
+  const uniqueId = (base, self) => {
+    let id = base, n = 2;
+    while (draft.steps.some((s) => s !== self && s.id === id)) id = `${base}_${n++}`;
+    return id;
+  };
+  const renameId = (step, next) => {
+    for (const s of draft.steps) s.allowed_targets = s.allowed_targets.map((t) => (t === step.id ? next : t));
+    step.id = next;
+  };
+  const check = (label, checked, onchange, title) =>
+    h("label", { title }, h("input", { type: "checkbox", checked, onchange: (e) => onchange(e.target.checked) }), label);
+  const toggle = (list, value, on) => {
+    const i = list.indexOf(value);
+    if (on && i < 0) list.push(value);
+    if (!on && i >= 0) list.splice(i, 1);
+  };
+
+  const card = (step, i) => {
+    const last = i === draft.steps.length - 1;
+    const models = [...new Set([...draft.models, step.model])];
+    const extraTools = step.tools.filter((t) => !KNOWN_TOOLS.includes(t));
+    const nameInput = h("input", { type: "text", class: "name", value: step.name, placeholder: "Step name" });
+    const idInput = step._new ? h("input", { type: "text", class: "id", value: step.id, title: "Step id: used in file names and transitions" }) : null;
+    nameInput.oninput = () => {
+      step.name = nameInput.value;
+      if (step._new && !step._idEdited) {
+        renameId(step, uniqueId(slug(step.name), step));
+        idInput.value = step.id;
+      }
+    };
+    nameInput.onchange = render; // refresh transition labels in other cards
+    if (idInput) idInput.onchange = () => { step._idEdited = true; renameId(step, idInput.value.trim()); render(); };
+
+    return h("div", { class: "step-card" },
+      h("div", { class: "top" },
+        h("span", { class: "num" }, i + 1),
+        nameInput,
+        idInput ?? h("code", { title: "Step id (fixed once created: runs and messages use it)" }, step.id),
+        h("span", { class: "spacer" }),
+        h("button", { class: "small", disabled: i === 0, title: "Move up", onclick: () => { draft.steps.splice(i - 1, 0, ...draft.steps.splice(i, 1)); render(); } }, "↑"),
+        h("button", { class: "small", disabled: last, title: "Move down", onclick: () => { draft.steps.splice(i + 1, 0, ...draft.steps.splice(i, 1)); render(); } }, "↓"),
+        h("button", { class: "small danger", title: "Remove step", onclick: () => {
+          draft.steps.splice(i, 1);
+          for (const s of draft.steps) s.allowed_targets = s.allowed_targets.filter((t) => t !== step.id);
+          render();
+        } }, "✕"),
+      ),
+      h("div", { class: "grid" },
+        h("span", { class: "lbl" }, "Model"),
+        h("div", { class: "inline" },
+          h("select", { onchange: (e) => (step.model = e.target.value) }, models.map((m) => h("option", { value: m, selected: m === step.model }, m))),
+          h("label", {}, "workers", h("input", { type: "number", min: 0, max: 32, value: step.max_workers, onchange: (e) => (step.max_workers = Math.max(0, parseInt(e.target.value, 10) || 0)) })),
+          check("requires approval", step.require_approval, (v) => (step.require_approval = v)),
+          h("label", { title: "claude --permission-mode" }, "permissions",
+            h("select", { onchange: (e) => (step.permission_mode = e.target.value) },
+              [...new Set([...PERMISSION_MODES, step.permission_mode])].map((m) => h("option", { value: m, selected: m === step.permission_mode }, m)))),
+        ),
+        h("span", { class: "lbl" }, "Transitions"),
+        h("div", { class: "checks" },
+          check(last ? "next (= done)" : `next (→ ${draft.steps[i + 1].name})`, step.allowed_targets.includes("next"), (v) => toggle(step.allowed_targets, "next", v)),
+          check("human", step.allowed_targets.includes("human"), (v) => toggle(step.allowed_targets, "human", v)),
+          draft.steps.filter((s) => s !== step).map((s) =>
+            check(`${s.name}`, step.allowed_targets.includes(s.id), (v) => toggle(step.allowed_targets, s.id, v), `Allow sending the item to ${s.name} (${s.id})`)),
+        ),
+        h("span", { class: "lbl" }, "Tools"),
+        h("div", { class: "checks" },
+          KNOWN_TOOLS.map((t) => check(t, step.tools.includes(t), (v) => toggle(step.tools, t, v))),
+          h("input", {
+            type: "text", value: extraTools.join(", "), placeholder: "other tools, comma-separated", style: "width:220px",
+            onchange: (e) => {
+              const extra = e.target.value.split(",").map((x) => x.trim()).filter(Boolean);
+              step.tools = [...step.tools.filter((t) => KNOWN_TOOLS.includes(t)), ...extra];
+            },
+          }),
+        ),
+      ),
+    );
+  };
+
+  function render() {
+    const scroll = $("#dialog-body").scrollTop;
+    body.replaceChildren(
+      h("div", { class: "pl-settings" },
+        h("div", {}, h("label", {}, "Max backward moves per item"),
+          h("input", { type: "number", min: 0, max: 100, value: draft.max_iterations, onchange: (e) => (draft.max_iterations = parseInt(e.target.value, 10) || 0) })),
+        h("div", {}, h("label", {}, "Models offered in dropdowns (comma-separated)"),
+          h("input", { type: "text", value: draft.models.join(", "), onchange: (e) => { draft.models = e.target.value.split(",").map((x) => x.trim()).filter(Boolean); render(); } })),
+      ),
+      h("p", { class: "help" }, "Steps run left to right. “next” moves an item to the following step (or finishes it after the last step); the other boxes are the steps an agent may send work to, e.g. back to Implementation when a build fails. New steps get a starter prompt you can edit from the column header. A step can only be removed when no unfinished item is in it."),
+      ...draft.steps.map(card),
+      h("button", { onclick: () => {
+        const prev = draft.steps[draft.steps.length - 1];
+        const step = {
+          id: uniqueId("new_step"), name: "New step", model: prev?.model || draft.models[0] || "claude-sonnet-5-5",
+          max_workers: 1, require_approval: false, allowed_targets: ["next", "human"],
+          tools: ["Read", "Grep", "Glob", "Bash", "Write"], permission_mode: "dontAsk", _new: true,
+        };
+        draft.steps.push(step);
+        render();
+        $("#dialog-body").scrollTop = $("#dialog-body").scrollHeight;
+      } }, "+ Add step"),
+    );
+    $("#dialog-body").scrollTop = scroll;
+  }
+
+  dialog("Pipeline", [body], () => {
+    const steps = draft.steps.map(({ _new, _idEdited, ...s }) => s);
+    return api("PUT", "/api/pipeline", { ...draft, steps });
+  }, "Save pipeline", true);
+  render();
 }
 
 function moveDialog(item, back = false) {
@@ -615,7 +826,10 @@ function moveDialog(item, back = false) {
 
 $("#btn-add").onclick = addDialog;
 $("#btn-general").onclick = () => editPrompt("general", "General prompt");
-$("#btn-settings").onclick = settingsDialog;
+$("#btn-pipeline").onclick = pipelineDialog;
+$("#repo").onclick = workspaceDialog;
+$("#btn-open-repo").onclick = workspaceDialog;
+$("#dialog-cancel").onclick = () => $("#dialog").close();
 $("#insp-close").onclick = closeInspector;
 $("#insp-run").onchange = (e) => {
   S.insp.run = e.target.value ? parseInt(e.target.value, 10) : null;

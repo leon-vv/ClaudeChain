@@ -18,15 +18,27 @@ to each other only through files, and each one decides where the work goes next
 ## Running
 
 ```bash
-cargo run --release -- --repo /path/to/your/repo
+cargo run --release
 ```
 
-Then open http://127.0.0.1:7878. Options: `--port`, `--host`, `--data <dir>`
-(default `<repo>/.claudechain`, which is added to the repo's `.git/info/exclude`),
-and `--claude <path>`.
+Then open http://127.0.0.1:7878 and pick a repository with the folder browser
+(click the 📁 path in the header to switch later). ClaudeChain remembers recent
+repositories in `~/.config/claudechain/state.json` and reopens the last one on
+start. Each repository has its own data directory (default
+`<repo>/.claudechain`, which is added to the repo's `.git/info/exclude`), so its
+pipeline, prompts and items stay with it. Switching is refused while agents run.
+
+Options: `--repo <path>` and `--data <dir>` to open a repository directly,
+`--port`, `--host`, and `--claude <path>`.
 
 ## Using it
 
+- **Pipeline** (or *Edit pipeline…* on the board): add, remove, rename and
+  reorder steps, and set per step the model, workers, approval, permission
+  mode, tools and allowed transitions ("next", "human", or any other step).
+  New steps get a starter prompt to edit from their column header. A step can
+  only be removed when no unfinished item is in it, and every step needs the
+  Write tool for its message and transition files.
 - **+ Add issue**: paste a GitHub issue URL, `#123`, or plain issue text.
 - **Column headers**: pick the model, the maximum number of agents running that
   step at once (0 pauses the step), whether items need your approval before the
@@ -71,8 +83,13 @@ ends, ClaudeChain reads its `transition.json` and moves the item. A missing
 or invalid transition, a stop, or too many backward moves (`max_iterations`)
 hands the item to you (⚠ needs human).
 
-Steps, tools, permission mode and allowed transitions are edited in
-`pipeline.toml` (restart to apply). Agents run with `--permission-mode dontAsk`
+The pipeline is stored in `pipeline.toml`; edit it from the UI (or by hand,
+then restart). Agents run with `--permission-mode dontAsk`
 and only the tools listed for their step, and don't load your own MCP servers.
 If ClaudeChain stops, running agents are stopped too, and their items are
 requeued on the next start.
+
+The server only listens on localhost by default. Because it can run agents and
+browse folders, it rejects requests whose Host header isn't a local name, and
+changes need an `x-claudechain` header, so other websites can't drive it from
+your browser.

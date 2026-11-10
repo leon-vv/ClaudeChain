@@ -15,7 +15,7 @@ pub struct Pipeline {
     /// Models offered in the UI dropdowns.
     #[serde(default = "default_models")]
     pub models: Vec<String>,
-    #[serde(rename = "step")]
+    #[serde(rename = "step", alias = "steps")]
     pub steps: Vec<Step>,
 }
 
@@ -81,7 +81,7 @@ impl Pipeline {
         self.step_index(id).and_then(|i| self.steps.get(i + 1))
     }
 
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if self.steps.is_empty() {
             bail!("pipeline has no steps");
         }
@@ -89,8 +89,22 @@ impl Pipeline {
             if self.steps[..i].iter().any(|o| o.id == s.id) {
                 bail!("duplicate step id '{}'", s.id);
             }
-            if s.id == "general" || s.id.contains(['/', '\\', '.']) {
-                bail!("invalid step id '{}'", s.id);
+            let id_ok = !s.id.is_empty()
+                && s.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+            if !id_ok || matches!(s.id.as_str(), "general" | "next" | "human" | "done") {
+                bail!("invalid step id '{}': use lowercase letters, digits, '_' or '-' (reserved: general, next, human, done)", s.id);
+            }
+            if s.name.trim().is_empty() {
+                bail!("step '{}' needs a name", s.id);
+            }
+            if s.model.trim().is_empty() {
+                bail!("step '{}' needs a model", s.id);
+            }
+            if !s.tools.iter().any(|t| t == "Write") {
+                bail!("step '{}' needs the Write tool to write its message and transition files", s.name);
+            }
+            if s.allowed_targets.is_empty() {
+                bail!("step '{}' has no allowed transitions", s.name);
             }
             for t in &s.allowed_targets {
                 if t != "next" && t != "human" && !self.steps.iter().any(|o| &o.id == t) {
@@ -133,6 +147,14 @@ pub fn load_or_init(data: &Path) -> Result<Pipeline> {
 pub fn save(data: &Path, pipeline: &Pipeline) -> Result<()> {
     let text = toml::to_string_pretty(pipeline)?;
     write_atomic(&pipeline_path(data), text.as_bytes())
+}
+
+/// Starting prompt for a step added from the UI.
+pub fn stub_prompt(name: &str) -> String {
+    format!(
+        "Your step is **{name}**.\n\nDescribe what this agent should do, what it must not do, \
+         and when to send the item onward, back, or to a human.\n"
+    )
 }
 
 pub fn read_prompt(data: &Path, id: &str) -> String {

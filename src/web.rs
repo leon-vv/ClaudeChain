@@ -2,8 +2,10 @@ use std::convert::Infallible;
 use std::path::{Component, Path as FsPath};
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
-use axum::http::{StatusCode, header};
+use axum::extract::{FromRequestParts, Path, Query, Request, State};
+use axum::http::request::Parts;
+use axum::http::{Method, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -19,8 +21,19 @@ use crate::config;
 use crate::git;
 use crate::orchestrator::{App, MessageMode};
 use crate::store::Layout;
+use crate::workspace::{self, Workspace};
 
-type AppState = Arc<App>;
+type Ws = Arc<Workspace>;
+
+/// The app for the currently open repository; fails when none is open.
+pub struct Cur(Arc<App>);
+
+impl FromRequestParts<Ws> for Cur {
+    type Rejection = ApiError;
+    async fn from_request_parts(_: &mut Parts, ws: &Ws) -> Result<Self, ApiError> {
+        ws.app().map(Cur).ok_or_else(|| anyhow::anyhow!("no repository is open").into())
+    }
+}
 
 pub struct ApiError(anyhow::Error);
 
@@ -38,13 +51,16 @@ impl IntoResponse for ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 
-pub fn router(app: AppState) -> Router {
+pub fn router(ws: Ws, allowed_hosts: Vec<String>) -> Router {
     Router::new()
         .route("/", get(|| static_file("text/html; charset=utf-8", include_str!("../static/index.html"))))
         .route("/app.js", get(|| static_file("text/javascript", include_str!("../static/app.js"))))
         .route("/style.css", get(|| static_file("text/css", include_str!("../static/style.css"))))
         .route("/api/state", get(state))
         .route("/api/events", get(events))
+        .route("/api/workspace", post(open_workspace))
+        .route("/api/fs", get(list_dir))
+        .route("/api/pipeline", put(put_pipeline))
         .route("/api/settings", put(put_settings))
         .route("/api/steps/{step}", put(put_step))
         .route("/api/prompts/{id}", get(get_prompt).put(put_prompt))
@@ -59,14 +75,37 @@ pub fn router(app: AppState) -> Router {
         .route("/api/items/{id}/files", get(list_files))
         .route("/api/items/{id}/file", get(get_file))
         .route("/api/items/{id}/diff", get(get_diff))
-        .with_state(app)
+        .layer(middleware::from_fn(move |req, next| guard(allowed_hosts.clone(), req, next)))
+        .with_state(ws)
+}
+
+/// The API can run agents and read the filesystem, so other websites must not
+/// be able to use it through the browser: the Host header must be a local name
+/// (against DNS rebinding) and changes need a custom header, which a
+/// cross-origin page can't send without a CORS preflight we never approve.
+async fn guard(allowed_hosts: Vec<String>, req: Request, next: Next) -> Response {
+    let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
+    let name = host.rsplit_once(':').map_or(host, |(n, port)| if port.chars().all(|c| c.is_ascii_digit()) { n } else { host });
+    let host_ok = allowed_hosts.is_empty() || allowed_hosts.iter().any(|a| a == name);
+    if !host_ok {
+        return (StatusCode::FORBIDDEN, "unexpected Host header").into_response();
+    }
+    let changes = !matches!(*req.method(), Method::GET | Method::HEAD);
+    if changes && req.headers().get("x-claudechain").is_none() {
+        return (StatusCode::FORBIDDEN, "missing x-claudechain header").into_response();
+    }
+    next.run(req).await
 }
 
 async fn static_file(content_type: &'static str, body: &'static str) -> impl IntoResponse {
     ([(header::CONTENT_TYPE, content_type), (header::CACHE_CONTROL, "no-cache")], body)
 }
 
-async fn state(State(app): State<AppState>) -> Json<Value> {
+async fn state(State(ws): State<Ws>) -> Json<Value> {
+    let recent = ws.recent();
+    let Some(app) = ws.app() else {
+        return Json(json!({"repo": null, "recent": recent, "home": workspace::home_dir()}));
+    };
     // `step` is named for TOML's [[step]] tables; the API calls it `steps`.
     let mut pipeline = json!(app.pipeline());
     if let Some(obj) = pipeline.as_object_mut() {
@@ -77,13 +116,16 @@ async fn state(State(app): State<AppState>) -> Json<Value> {
     Json(json!({
         "repo": app.layout.repo,
         "data": app.layout.data,
+        "default_data": workspace::default_data_dir(&app.layout.repo),
+        "recent": recent,
+        "home": workspace::home_dir(),
         "pipeline": pipeline,
         "items": items,
     }))
 }
 
-async fn events(State(app): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream = BroadcastStream::new(app.events.subscribe()).map(|msg| {
+async fn events(State(ws): State<Ws>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let stream = BroadcastStream::new(ws.events.subscribe()).map(|msg| {
         Ok(match msg {
             Ok(ev) => Event::default().json_data(ev).unwrap_or_default(),
             // The browser fell behind; it reloads the full state.
@@ -94,11 +136,40 @@ async fn events(State(app): State<AppState>) -> Sse<impl Stream<Item = Result<Ev
 }
 
 #[derive(Deserialize)]
+struct OpenWorkspace {
+    repo: String,
+    data: Option<String>,
+}
+
+async fn open_workspace(State(ws): State<Ws>, Json(o): Json<OpenWorkspace>) -> ApiResult<Json<Value>> {
+    let data = o.data.as_deref().map(str::trim).filter(|d| !d.is_empty()).map(FsPath::new);
+    ws.open(FsPath::new(o.repo.trim()), data).await?;
+    Ok(Json(json!({})))
+}
+
+#[derive(Deserialize)]
+struct DirQuery {
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    hidden: bool,
+}
+
+async fn list_dir(Query(q): Query<DirQuery>) -> ApiResult<Json<Value>> {
+    Ok(Json(json!(workspace::list_dir(&q.path, q.hidden)?)))
+}
+
+async fn put_pipeline(Cur(app): Cur, Json(p): Json<config::Pipeline>) -> ApiResult<Json<Value>> {
+    app.replace_pipeline(p)?;
+    Ok(Json(json!({})))
+}
+
+#[derive(Deserialize)]
 struct Settings {
     max_iterations: u32,
 }
 
-async fn put_settings(State(app): State<AppState>, Json(s): Json<Settings>) -> ApiResult<Json<Value>> {
+async fn put_settings(Cur(app): Cur, Json(s): Json<Settings>) -> ApiResult<Json<Value>> {
     app.update_pipeline(|p| {
         p.max_iterations = s.max_iterations;
         Ok(())
@@ -113,7 +184,7 @@ struct StepUpdate {
     require_approval: Option<bool>,
 }
 
-async fn put_step(State(app): State<AppState>, Path(step): Path<String>, Json(u): Json<StepUpdate>) -> ApiResult<Json<Value>> {
+async fn put_step(Cur(app): Cur, Path(step): Path<String>, Json(u): Json<StepUpdate>) -> ApiResult<Json<Value>> {
     app.update_pipeline(|p| {
         let s = p.step_mut(&step).ok_or_else(|| anyhow::anyhow!("unknown step '{step}'"))?;
         if let Some(m) = u.model {
@@ -137,7 +208,7 @@ fn check_prompt_id(app: &App, id: &str) -> ApiResult<()> {
     Ok(())
 }
 
-async fn get_prompt(State(app): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+async fn get_prompt(Cur(app): Cur, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     check_prompt_id(&app, &id)?;
     Ok(Json(json!({"text": config::read_prompt(&app.layout.data, &id)})))
 }
@@ -147,23 +218,23 @@ struct Text {
     text: String,
 }
 
-async fn put_prompt(State(app): State<AppState>, Path(id): Path<String>, Json(t): Json<Text>) -> ApiResult<Json<Value>> {
+async fn put_prompt(Cur(app): Cur, Path(id): Path<String>, Json(t): Json<Text>) -> ApiResult<Json<Value>> {
     check_prompt_id(&app, &id)?;
     config::write_prompt(&app.layout.data, &id, &t.text)?;
     Ok(Json(json!({})))
 }
 
-async fn add_item(State(app): State<AppState>, Json(t): Json<Text>) -> ApiResult<Json<Value>> {
+async fn add_item(Cur(app): Cur, Json(t): Json<Text>) -> ApiResult<Json<Value>> {
     let item = app.add_item(&t.text).await?;
     Ok(Json(json!(item)))
 }
 
-async fn remove_item(State(app): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+async fn remove_item(Cur(app): Cur, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     app.remove_item(&id).await?;
     Ok(Json(json!({})))
 }
 
-async fn approve(State(app): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+async fn approve(Cur(app): Cur, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     app.approve(&id)?;
     Ok(Json(json!({})))
 }
@@ -174,17 +245,17 @@ struct Move {
     note: Option<String>,
 }
 
-async fn move_item(State(app): State<AppState>, Path(id): Path<String>, Json(m): Json<Move>) -> ApiResult<Json<Value>> {
+async fn move_item(Cur(app): Cur, Path(id): Path<String>, Json(m): Json<Move>) -> ApiResult<Json<Value>> {
     app.move_item(&id, &m.step, m.note)?;
     Ok(Json(json!({})))
 }
 
-async fn retry(State(app): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+async fn retry(Cur(app): Cur, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     app.retry(&id)?;
     Ok(Json(json!({})))
 }
 
-async fn stop(State(app): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+async fn stop(Cur(app): Cur, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     app.stop(&id)?;
     Ok(Json(json!({})))
 }
@@ -196,7 +267,7 @@ struct Message {
     run: Option<u32>,
 }
 
-async fn message(State(app): State<AppState>, Path(id): Path<String>, Json(m): Json<Message>) -> ApiResult<Json<Value>> {
+async fn message(Cur(app): Cur, Path(id): Path<String>, Json(m): Json<Message>) -> ApiResult<Json<Value>> {
     app.send_message(&id, m.run, m.mode, m.text)?;
     Ok(Json(json!({})))
 }
@@ -205,7 +276,7 @@ fn read_opt(path: &FsPath) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-async fn get_run(State(app): State<AppState>, Path((id, n)): Path<(String, u32)>) -> ApiResult<Json<Value>> {
+async fn get_run(Cur(app): Cur, Path((id, n)): Path<(String, u32)>) -> ApiResult<Json<Value>> {
     let run = {
         let items = app.items.lock().unwrap();
         let item = items.get(&id).ok_or_else(|| anyhow::anyhow!("no item '{id}'"))?;
@@ -231,7 +302,7 @@ async fn get_run(State(app): State<AppState>, Path((id, n)): Path<(String, u32)>
     })))
 }
 
-async fn list_files(State(app): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+async fn list_files(Cur(app): Cur, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let root = app.layout.item_dir(&id);
     let mut files = vec![];
     collect_files(&root, &root, &mut files)?;
@@ -256,7 +327,7 @@ struct FileQuery {
     path: String,
 }
 
-async fn get_file(State(app): State<AppState>, Path(id): Path<String>, Query(q): Query<FileQuery>) -> ApiResult<Json<Value>> {
+async fn get_file(Cur(app): Cur, Path(id): Path<String>, Query(q): Query<FileQuery>) -> ApiResult<Json<Value>> {
     let rel = FsPath::new(&q.path);
     if rel.components().any(|c| !matches!(c, Component::Normal(_))) {
         return Err(anyhow::anyhow!("invalid path").into());
@@ -265,7 +336,7 @@ async fn get_file(State(app): State<AppState>, Path(id): Path<String>, Query(q):
     Ok(Json(json!({"text": text})))
 }
 
-async fn get_diff(State(app): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+async fn get_diff(Cur(app): Cur, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let base = app.items.lock().unwrap().get(&id).and_then(|i| i.base_commit.clone());
     let text = git::diff(&app.layout.worktree(&id), base.as_deref()).await?;
     Ok(Json(json!({"text": text})))

@@ -2,6 +2,7 @@
 //! A scheduler loop starts queued items whenever a step has a free worker.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -23,6 +24,8 @@ pub enum UiEvent {
     Item { item: Box<Item> },
     ItemRemoved { id: String },
     Pipeline,
+    /// A different repository was opened (or none is open).
+    Workspace,
     RunEvent { item: String, run: u32, event: Value },
 }
 
@@ -34,6 +37,8 @@ pub struct App {
     running: Mutex<HashMap<String, RunControl>>,
     pub events: broadcast::Sender<UiEvent>,
     wake: Notify,
+    /// Set when another repository is opened; the scheduler stops.
+    closed: AtomicBool,
 }
 
 /// What the human wants to do with a message typed in the run inspector.
@@ -49,7 +54,7 @@ pub enum MessageMode {
 }
 
 impl App {
-    pub fn new(layout: Layout, claude: String) -> Result<Arc<Self>> {
+    pub fn new(layout: Layout, claude: String, events: broadcast::Sender<UiEvent>) -> Result<Arc<Self>> {
         let pipeline = config::load_or_init(&layout.data)?;
         let mut items = store::load_items(&layout)?;
         // Agents don't survive a restart: requeue whatever was running.
@@ -65,7 +70,6 @@ impl App {
                 store::save_item(&layout, item)?;
             }
         }
-        let (events, _) = broadcast::channel(4096);
         Ok(Arc::new(Self {
             layout,
             claude,
@@ -74,6 +78,7 @@ impl App {
             running: Mutex::new(HashMap::new()),
             events,
             wake: Notify::new(),
+            closed: AtomicBool::new(false),
         }))
     }
 
@@ -286,8 +291,48 @@ impl App {
 
     // ---- Scheduling ------------------------------------------------------
 
+    /// Stops scheduling so another repository can be opened. Fails while
+    /// agents are running.
+    pub fn close(&self) -> Result<()> {
+        let items = self.items.lock().unwrap();
+        let running: Vec<_> = items.values().filter(|i| i.status == Status::Running).map(|i| i.id.as_str()).collect();
+        if !running.is_empty() {
+            bail!("agents are still running ({}); stop them first", running.join(", "));
+        }
+        self.closed.store(true, Ordering::SeqCst);
+        drop(items);
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    /// Replaces the whole pipeline (steps, transitions, settings) from the UI.
+    pub fn replace_pipeline(&self, next: Pipeline) -> Result<()> {
+        next.validate()?;
+        {
+            // Every unfinished item must still have a step to be in.
+            let items = self.items.lock().unwrap();
+            let orphans: Vec<_> = items
+                .values()
+                .filter(|i| i.status != Status::Done && next.step(&i.step).is_none())
+                .map(|i| format!("{} ({})", i.id, i.step))
+                .collect();
+            if !orphans.is_empty() {
+                bail!("these items are in a step you removed; move them first: {}", orphans.join(", "));
+            }
+        }
+        for step in &next.steps {
+            if !config::prompt_path(&self.layout.data, &step.id).exists() {
+                config::write_prompt(&self.layout.data, &step.id, &config::stub_prompt(&step.name))?;
+            }
+        }
+        self.update_pipeline(|p| {
+            *p = next;
+            Ok(())
+        })
+    }
+
     pub async fn scheduler(self: Arc<Self>) {
-        loop {
+        while !self.closed.load(Ordering::SeqCst) {
             self.schedule();
             tokio::select! {
                 _ = self.wake.notified() => {}
@@ -301,6 +346,9 @@ impl App {
         let mut to_start = vec![];
         {
             let mut items = self.items.lock().unwrap();
+            if self.closed.load(Ordering::SeqCst) {
+                return;
+            }
             for step in &pipeline.steps {
                 let mut busy = items.values().filter(|i| i.status == Status::Running && i.step == step.id).count();
                 let mut queue: Vec<&mut Item> = items
