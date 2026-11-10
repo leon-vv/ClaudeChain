@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -17,12 +19,15 @@ pub struct RunSpec {
     pub initial_prompt: String,
     pub events_path: PathBuf,
     pub stderr_path: PathBuf,
+    /// Set to the child's process id once it has started.
+    pub pid: Arc<AtomicU32>,
 }
 
 /// Handle the orchestrator keeps for a running agent.
 pub struct RunControl {
     pub messages: mpsc::UnboundedSender<String>,
     pub stop: Option<oneshot::Sender<()>>,
+    pub pid: Arc<AtomicU32>,
 }
 
 #[derive(Debug, Default)]
@@ -90,6 +95,7 @@ pub async fn run(
         });
     }
     let mut child = cmd.spawn().with_context(|| format!("starting {}", spec.program))?;
+    spec.pid.store(child.id().unwrap_or(0), Ordering::Relaxed);
     let mut stdin = child.stdin.take();
     let mut stdout = BufReader::new(child.stdout.take().expect("piped stdout")).lines();
 

@@ -50,6 +50,14 @@ Options: `--repo <path>` and `--data <dir>` to open a repository directly,
   - *Input*: the exact system prompt, prompt, tools and command line.
   - *Output*: the message file and `transition.json` the agent wrote.
   - *Files*: everything in the item folder. *Diff*: the item branch's changes.
+- **Token usage**: the header shows your plan's 5-hour and weekly usage as
+  reported by Claude Code; running cells show live tokens, items show their
+  total, and the inspector shows tokens and context size for each run.
+- **Resources** tab: plan limits with reset times, an auto-pause threshold
+  (new runs wait while a plan limit is at or above it), CPU per core, memory,
+  temperatures, load and disk, CPU and memory per running agent including the
+  builds and tests it started, and token usage by step, model, item and hour.
+  System monitoring reads /proc and /sys, so it works on Linux only.
 - **Giving direction**:
   - *Send to agent* (while running): delivered into the live session.
   - *Continue this run* (after it finished): resumes the session with your message.

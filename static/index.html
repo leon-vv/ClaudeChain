@@ -10,9 +10,14 @@
   <header class="top">
     <div class="brand">
       <h1>ClaudeChain</h1>
+      <nav class="pages" id="pages">
+        <button data-page="board" class="active">Board</button>
+        <button data-page="resources">Resources</button>
+      </nav>
       <button class="repo" id="repo" title="Open another repository">📁 <span id="repo-path">no repository</span></button>
     </div>
     <div class="actions">
+      <button class="plan" id="plan" title="Plan usage reported by Claude Code" hidden></button>
       <span class="conn" id="conn" title="Live connection to the server">●</span>
       <button id="btn-general">General prompt</button>
       <button id="btn-pipeline">Pipeline</button>
@@ -20,7 +25,9 @@
     </div>
   </header>
 
-  <main class="board-wrap">
+  <main class="resources" id="resources-page" hidden></main>
+
+  <main class="board-wrap" id="board-page">
     <table class="board" id="board"></table>
     <div class="empty" id="no-repo" hidden>
       <p>No repository is open.</p>
@@ -72,5 +79,6 @@
 
   <div class="toast" id="toast" hidden></div>
   <script src="/app.js"></script>
+  <script src="/resources.js"></script>
 </body>
 </html>

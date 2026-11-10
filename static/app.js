@@ -11,6 +11,8 @@ const S = {
   pipeline: null,
   items: new Map(),
   insp: null, // { id, run, tab, data, file }
+  account: null, // { limits, pause_above, paused }
+  page: "board",
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -66,6 +68,58 @@ const stepIndex = (id) => S.pipeline.steps.findIndex((s) => s.id === id);
 const shortModel = (m) => m.replace(/^claude-/, "");
 const fmtCost = (c) => (c == null ? "" : `$${c.toFixed(2)}`);
 
+function fmtTok(n) {
+  if (n == null) return "";
+  if (n < 1000) return String(n);
+  if (n < 1e6) return `${(n / 1000).toFixed(n < 1e4 ? 1 : 0)}k`;
+  return `${(n / 1e6).toFixed(n < 1e7 ? 2 : 1)}M`;
+}
+const tokTotal = (t) => (t ? t.input + t.output + t.cache_read + t.cache_write : 0);
+const tokTitle = (t) => t ? `input ${t.input.toLocaleString()} · output ${t.output.toLocaleString()} · cache read ${t.cache_read.toLocaleString()} · cache write ${t.cache_write.toLocaleString()}` : "";
+
+/// Plan windows from the latest rate_limit_event, ignoring ones that already reset.
+function planWindows() {
+  const w = S.account?.limits?.info?.unifiedWindows || {};
+  const now = Date.now() / 1000;
+  return Object.entries(w).map(([key, v]) => ({
+    key,
+    name: key === "five_hour" ? "5-hour" : key === "seven_day" ? "weekly" : key.replace(/_/g, " "),
+    short: key === "five_hour" ? "5h" : key === "seven_day" ? "wk" : key.slice(0, 3),
+    pct: v.resetsAt > now ? Math.round((v.utilization || 0) * 100) : 0,
+    resets: v.resetsAt ? new Date(v.resetsAt * 1000) : null,
+    status: v.status,
+  }));
+}
+
+function fmtUntil(date) {
+  if (!date) return "";
+  const m = Math.max(0, Math.round((date - Date.now()) / 60000));
+  if (m < 60) return `${m}m`;
+  if (m < 48 * 60) return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}`;
+  return `${Math.round(m / 1440)}d`;
+}
+
+const levelClass = (pct) => (pct >= 90 ? "bad" : pct >= 70 ? "warn" : "ok");
+
+function renderPlan() {
+  const el = $("#plan");
+  const windows = planWindows();
+  el.hidden = !windows.length && !S.account?.paused;
+  el.classList.toggle("paused", !!S.account?.paused);
+  el.replaceChildren(...[
+    S.account?.paused && h("span", { class: "plan-paused" }, "⏸ paused"),
+    ...windows.map((w) => h("span", { class: "plan-win" },
+      h("span", { class: "plan-label" }, w.short),
+      h("span", { class: "meter" }, h("span", { class: `fill ${levelClass(w.pct)}`, style: `width:${w.pct}%` })),
+      `${w.pct}%`)),
+  ].filter(Boolean));
+  el.title = [
+    ...windows.map((w) => `${w.name} limit: ${w.pct}% used, resets in ${fmtUntil(w.resets)}`),
+    S.account?.paused ? `New runs paused: ${S.account.paused}` : null,
+    "Click for details",
+  ].filter(Boolean).join("\n");
+}
+
 function fmtDuration(run) {
   if (!run) return "";
   const end = run.ended ? new Date(run.ended) : new Date();
@@ -91,8 +145,11 @@ async function load() {
   S.recent = st.recent || [];
   S.home = st.home;
   S.pipeline = st.pipeline ?? null;
+  S.account = st.account ?? null;
+  renderPlan();
   S.items = new Map((st.items || []).map((i) => [i.id, i]));
-  $("#repo-path").textContent = st.repo ?? "no repository";
+  // The folder name keeps the header on one line; the tooltip has the full path.
+  $("#repo-path").textContent = st.repo ? st.repo.replace(/\/+$/, "").split("/").pop() : "no repository";
   $("#repo").title = st.repo ? `Repository ${st.repo}\nData ${st.data}\n\nClick to open another repository` : "Open a repository";
   for (const id of ["#btn-general", "#btn-pipeline", "#btn-add"]) $(id).disabled = !st.repo;
   $("#no-repo").hidden = !!st.repo;
@@ -130,6 +187,11 @@ function connect() {
         scheduleBoard();
         if (S.insp?.id === ev.id) closeInspector();
         break;
+      case "limits":
+        S.account = ev.account;
+        renderPlan();
+        if (S.page === "resources") renderResources();
+        break;
       case "workspace":
         closeInspector();
         load();
@@ -155,6 +217,7 @@ function scheduleBoard() {
   requestAnimationFrame(() => {
     boardPending = false;
     renderBoard();
+    if (S.page === "resources") renderResources();
   });
 }
 
@@ -211,6 +274,7 @@ function stepHeader(s, busy) {
 
 function itemCell(it) {
   const cost = it.runs.reduce((sum, r) => sum + (r.cost_usd || 0), 0);
+  const tokens = it.runs.reduce((sum, r) => sum + tokTotal(r.tokens), 0);
   const last = it.runs[it.runs.length - 1];
   return h("td", { class: "item-cell" },
     h("div", { class: "title", onclick: () => openInspector(it.id, last?.n) }, it.number ? `#${it.number} ` : "", it.title || it.id),
@@ -219,7 +283,7 @@ function itemCell(it) {
       it.url && h("a", { href: it.url, target: "_blank", rel: "noopener" }, "issue ↗"),
       it.pr_url && h("a", { href: it.pr_url, target: "_blank", rel: "noopener" }, "PR ↗"),
       it.iteration > 0 && h("span", { title: "Backward moves" }, `↩ ${it.iteration}`),
-      cost > 0 && h("span", { title: "API-equivalent cost (covered by your subscription)" }, `≈ ${fmtCost(cost)}`),
+      tokens > 0 && h("span", { title: `${tokens.toLocaleString()} tokens over ${it.runs.length} runs; ≈ ${fmtCost(cost)} API-equivalent (covered by your subscription)` }, `${fmtTok(tokens)} tok`),
     ),
     it.status === "done" && h("div", { class: `state done` }, STATUS_LABEL.done),
     it.pending_notes.length > 0 && h("div", { class: "detail" }, `📝 ${it.pending_notes.length} note(s) for the next run`),
@@ -259,7 +323,9 @@ function stepCell(it, s) {
   }
   if (current) {
     const cls = it.status;
-    td.append(h("div", { class: `state ${cls}${cls === "running" ? " pulse" : ""}` }, STATUS_LABEL[cls]));
+    const live = cls === "running" ? it.runs[it.runs.length - 1]?.tokens : null;
+    td.append(h("div", { class: `state ${cls}${cls === "running" ? " pulse" : ""}`, title: tokTitle(live) },
+      STATUS_LABEL[cls], live ? ` · ${fmtTok(tokTotal(live))}` : ""));
     if (it.status === "awaiting_approval") {
       td.append(h("div", { class: "gate" },
         h("button", { class: "small primary", onclick: (e) => { e.stopPropagation(); act(() => api("POST", `/api/items/${it.id}/approve`)); } }, "Approve"),
@@ -337,6 +403,8 @@ function renderInspectorChrome() {
   const meta = [
     `${stepName(item.step)} · ${STATUS_LABEL[item.status] || item.status}`,
     run && `run #${run.n} ${stepName(run.step)} · ${shortModel(run.model)} · ${fmtDuration(run)}`,
+    run?.tokens && `${fmtTok(tokTotal(run.tokens))} tokens (${fmtTok(run.tokens.output)} out)`,
+    run?.tokens?.context && `context ${fmtTok(run.tokens.context)}${run.tokens.context_window ? ` / ${fmtTok(run.tokens.context_window)}` : ""}`,
     run?.cost_usd != null && `≈ ${fmtCost(run.cost_usd)} API-equivalent`,
     run?.resumed_from && `continues #${run.resumed_from}`,
   ].filter(Boolean);
@@ -824,6 +892,20 @@ function moveDialog(item, back = false) {
 
 // ---- Wiring --------------------------------------------------------------
 
+function showPage(page) {
+  S.page = page;
+  $("#board-page").hidden = page !== "board";
+  $("#resources-page").hidden = page !== "resources";
+  for (const b of document.querySelectorAll("#pages button")) b.classList.toggle("active", b.dataset.page === page);
+  if (page !== "board") closeInspector();
+  if (location.hash !== (page === "board" ? "" : `#${page}`)) history.replaceState(null, "", page === "board" ? location.pathname : `#${page}`);
+  if (page === "resources") startResources();
+  else stopResources();
+}
+$("#pages").onclick = (e) => e.target.dataset?.page && showPage(e.target.dataset.page);
+$("#plan").onclick = () => showPage("resources");
+window.addEventListener("hashchange", () => showPage(location.hash === "#resources" ? "resources" : "board"));
+
 $("#btn-add").onclick = addDialog;
 $("#btn-general").onclick = () => editPrompt("general", "General prompt");
 $("#btn-pipeline").onclick = pipelineDialog;
@@ -864,3 +946,5 @@ setInterval(() => {
 }, 5000);
 
 connect();
+// resources.js loads after this script; switch pages once it has.
+window.addEventListener("DOMContentLoaded", () => location.hash === "#resources" && showPage("resources"));

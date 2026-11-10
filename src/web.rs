@@ -19,7 +19,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::config;
 use crate::git;
-use crate::orchestrator::{App, MessageMode};
+use crate::orchestrator::{self, App, MessageMode};
 use crate::store::Layout;
 use crate::workspace::{self, Workspace};
 
@@ -55,11 +55,14 @@ pub fn router(ws: Ws, allowed_hosts: Vec<String>) -> Router {
     Router::new()
         .route("/", get(|| static_file("text/html; charset=utf-8", include_str!("../static/index.html"))))
         .route("/app.js", get(|| static_file("text/javascript", include_str!("../static/app.js"))))
+        .route("/resources.js", get(|| static_file("text/javascript", include_str!("../static/resources.js"))))
         .route("/style.css", get(|| static_file("text/css", include_str!("../static/style.css"))))
         .route("/api/state", get(state))
         .route("/api/events", get(events))
         .route("/api/workspace", post(open_workspace))
         .route("/api/fs", get(list_dir))
+        .route("/api/resources", get(resources))
+        .route("/api/limits", put(put_limits))
         .route("/api/pipeline", put(put_pipeline))
         .route("/api/settings", put(put_settings))
         .route("/api/steps/{step}", put(put_step))
@@ -104,7 +107,12 @@ async fn static_file(content_type: &'static str, body: &'static str) -> impl Int
 async fn state(State(ws): State<Ws>) -> Json<Value> {
     let recent = ws.recent();
     let Some(app) = ws.app() else {
-        return Json(json!({"repo": null, "recent": recent, "home": workspace::home_dir()}));
+        return Json(json!({
+            "repo": null,
+            "recent": recent,
+            "home": workspace::home_dir(),
+            "account": orchestrator::account_json(&ws.account),
+        }));
     };
     // `step` is named for TOML's [[step]] tables; the API calls it `steps`.
     let mut pipeline = json!(app.pipeline());
@@ -119,6 +127,7 @@ async fn state(State(ws): State<Ws>) -> Json<Value> {
         "default_data": workspace::default_data_dir(&app.layout.repo),
         "recent": recent,
         "home": workspace::home_dir(),
+        "account": orchestrator::account_json(&ws.account),
         "pipeline": pipeline,
         "items": items,
     }))
@@ -157,6 +166,38 @@ struct DirQuery {
 
 async fn list_dir(Query(q): Query<DirQuery>) -> ApiResult<Json<Value>> {
     Ok(Json(json!(workspace::list_dir(&q.path, q.hidden)?)))
+}
+
+/// System load, history, and CPU/memory of each running agent's process tree.
+async fn resources(State(ws): State<Ws>) -> Json<Value> {
+    let agents: Vec<Value> = ws
+        .app()
+        .map(|app| app.agents())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| {
+            let usage = ws.monitor.tree(a.pid);
+            json!({"agent": a, "usage": usage})
+        })
+        .collect();
+    Json(json!({
+        "system": ws.monitor.latest(),
+        "history": ws.monitor.history(),
+        "agents": agents,
+        "server": ws.monitor.tree(std::process::id()),
+    }))
+}
+
+#[derive(Deserialize)]
+struct LimitSettings {
+    pause_above: Option<f64>,
+}
+
+async fn put_limits(State(ws): State<Ws>, Json(l): Json<LimitSettings>) -> ApiResult<Json<Value>> {
+    ws.account.set_pause_above(l.pause_above);
+    let account = orchestrator::account_json(&ws.account);
+    let _ = ws.events.send(orchestrator::UiEvent::Limits { account: account.clone() });
+    Ok(Json(account))
 }
 
 async fn put_pipeline(Cur(app): Cur, Json(p): Json<config::Pipeline>) -> ApiResult<Json<Value>> {

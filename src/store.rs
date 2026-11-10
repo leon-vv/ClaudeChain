@@ -36,6 +36,95 @@ pub struct Transition {
     pub pr_url: Option<String>,
 }
 
+/// Token usage of one run.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Tokens {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    /// Size of the context at the latest API call.
+    #[serde(default)]
+    pub context: u64,
+    #[serde(default)]
+    pub context_window: Option<u64>,
+}
+
+impl Tokens {
+    fn from_usage(u: &serde_json::Value) -> Self {
+        let n = |k: &str| u.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
+        Tokens {
+            input: n("input_tokens"),
+            output: n("output_tokens"),
+            cache_read: n("cache_read_input_tokens"),
+            cache_write: n("cache_creation_input_tokens"),
+            context: 0,
+            context_window: None,
+        }
+    }
+}
+
+/// Adds up token usage from a run's stream-json events. A reply with several
+/// content blocks arrives as several events with the same message id and the
+/// same usage, so usage is counted once per message id.
+#[derive(Debug, Default)]
+pub struct TokenMeter {
+    per_message: std::collections::HashMap<String, Tokens>,
+    order: Vec<String>,
+    final_total: Option<Tokens>,
+}
+
+impl TokenMeter {
+    /// Feeds one event; returns true when the totals changed.
+    pub fn observe(&mut self, event: &serde_json::Value) -> bool {
+        match event["type"].as_str() {
+            Some("assistant") => {
+                let msg = &event["message"];
+                let (Some(id), Some(usage)) = (msg["id"].as_str(), msg.get("usage")) else { return false };
+                let t = Tokens::from_usage(usage);
+                if self.per_message.get(id) == Some(&t) {
+                    return false;
+                }
+                if !self.per_message.contains_key(id) {
+                    self.order.push(id.to_string());
+                }
+                self.per_message.insert(id.to_string(), t);
+                true
+            }
+            Some("result") => {
+                let mut t = Tokens::from_usage(&event["usage"]);
+                let window = event["modelUsage"]
+                    .as_object()
+                    .and_then(|m| m.values().filter_map(|v| v["contextWindow"].as_u64()).max());
+                t.context_window = window;
+                t.context = self.live().context;
+                self.final_total = Some(t);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Totals so far; the result event's exact totals once the run is done.
+    pub fn total(&self) -> Tokens {
+        self.final_total.clone().unwrap_or_else(|| self.live())
+    }
+
+    fn live(&self) -> Tokens {
+        let mut sum = Tokens::default();
+        for t in self.per_message.values() {
+            sum.input += t.input;
+            sum.output += t.output;
+            sum.cache_read += t.cache_read;
+            sum.cache_write += t.cache_write;
+        }
+        if let Some(last) = self.order.last().and_then(|id| self.per_message.get(id)) {
+            sum.context = last.input + last.cache_read + last.cache_write;
+        }
+        sum
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Note {
     pub at: DateTime<Utc>,
@@ -63,6 +152,8 @@ pub struct Run {
     pub session_id: Option<String>,
     #[serde(default)]
     pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub tokens: Option<Tokens>,
     #[serde(default)]
     pub transition: Option<Transition>,
     /// Human-readable result: where the item went, or why it stopped.
@@ -201,4 +292,35 @@ pub fn load_items(layout: &Layout) -> Result<BTreeMap<String, Item>> {
         }
     }
     Ok(items)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn assistant(id: &str, input: u64, cache_read: u64, output: u64) -> serde_json::Value {
+        json!({"type": "assistant", "message": {"id": id, "usage": {
+            "input_tokens": input, "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": 10, "output_tokens": output}}})
+    }
+
+    #[test]
+    fn meter_counts_each_message_once_and_prefers_the_result() {
+        let mut m = TokenMeter::default();
+        assert!(m.observe(&assistant("a", 5, 100, 20)));
+        // Same message again (another content block): no change.
+        assert!(!m.observe(&assistant("a", 5, 100, 20)));
+        assert!(m.observe(&assistant("b", 3, 200, 7)));
+        let t = m.total();
+        assert_eq!((t.input, t.output, t.cache_read, t.cache_write), (8, 27, 300, 20));
+        assert_eq!(t.context, 3 + 200 + 10);
+
+        m.observe(&json!({"type": "result", "usage": {"input_tokens": 9, "output_tokens": 30,
+            "cache_read_input_tokens": 310, "cache_creation_input_tokens": 25},
+            "modelUsage": {"claude-haiku-5-5": {"contextWindow": 1000000}}}));
+        let t = m.total();
+        assert_eq!((t.input, t.output, t.cache_read, t.cache_write), (9, 30, 310, 25));
+        assert_eq!((t.context, t.context_window), (213, Some(1_000_000)));
+    }
 }

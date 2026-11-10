@@ -12,10 +12,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 
+use crate::account::Account;
 use crate::config::{self, Pipeline, Step};
 use crate::git;
 use crate::runner::{self, RunControl, RunSpec};
-use crate::store::{self, Item, Layout, Note, PendingResume, Run, Status, Transition};
+use crate::store::{self, Item, Layout, Note, PendingResume, Run, Status, TokenMeter, Transition};
 
 /// Events pushed to the browser over SSE.
 #[derive(Debug, Clone, Serialize)]
@@ -24,6 +25,8 @@ pub enum UiEvent {
     Item { item: Box<Item> },
     ItemRemoved { id: String },
     Pipeline,
+    /// Plan usage, the pause threshold, or the paused state changed.
+    Limits { account: Value },
     /// A different repository was opened (or none is open).
     Workspace,
     RunEvent { item: String, run: u32, event: Value },
@@ -39,6 +42,28 @@ pub struct App {
     wake: Notify,
     /// Set when another repository is opened; the scheduler stops.
     closed: AtomicBool,
+    pub account: Arc<Account>,
+    /// Last reason the scheduler held runs back, to notice changes.
+    paused: Mutex<Option<String>>,
+}
+
+/// A running agent, for the Resources page.
+#[derive(Debug, Clone, Serialize)]
+pub struct Agent {
+    pub item: String,
+    pub title: String,
+    pub step: String,
+    pub run: u32,
+    pub pid: u32,
+}
+
+/// Account-level usage info as sent to the UI.
+pub fn account_json(account: &Account) -> Value {
+    json!({
+        "limits": account.limits(),
+        "pause_above": account.pause_above(),
+        "paused": account.paused_reason(),
+    })
 }
 
 /// What the human wants to do with a message typed in the run inspector.
@@ -54,9 +79,33 @@ pub enum MessageMode {
 }
 
 impl App {
-    pub fn new(layout: Layout, claude: String, events: broadcast::Sender<UiEvent>) -> Result<Arc<Self>> {
+    pub fn new(
+        layout: Layout,
+        claude: String,
+        events: broadcast::Sender<UiEvent>,
+        account: Arc<Account>,
+    ) -> Result<Arc<Self>> {
         let pipeline = config::load_or_init(&layout.data)?;
         let mut items = store::load_items(&layout)?;
+        // Runs from before token tracking: count their tokens from the transcript.
+        for item in items.values_mut() {
+            let mut changed = false;
+            for run in item.runs.iter_mut().filter(|r| r.tokens.is_none() && r.ended.is_some()) {
+                let events = layout.run_dir(&item.id, run.n, &run.step).join("events.jsonl");
+                let Ok(text) = std::fs::read_to_string(events) else { continue };
+                let mut meter = TokenMeter::default();
+                for line in text.lines() {
+                    if let Ok(ev) = serde_json::from_str::<Value>(line) {
+                        meter.observe(&ev);
+                    }
+                }
+                run.tokens = Some(meter.total());
+                changed = true;
+            }
+            if changed {
+                store::save_item(&layout, item)?;
+            }
+        }
         // Agents don't survive a restart: requeue whatever was running.
         for item in items.values_mut() {
             if item.status == Status::Running {
@@ -79,6 +128,8 @@ impl App {
             events,
             wake: Notify::new(),
             closed: AtomicBool::new(false),
+            account,
+            paused: Mutex::new(None),
         }))
     }
 
@@ -100,6 +151,40 @@ impl App {
         drop(items);
         self.wake.notify_one();
         Ok(out)
+    }
+
+    /// Like `update_item`, but only in memory (for frequent live updates);
+    /// the item is saved when its run finishes.
+    fn update_item_live(&self, id: &str, f: impl FnOnce(&mut Item)) {
+        let mut items = self.items.lock().unwrap();
+        if let Some(item) = items.get_mut(id) {
+            f(item);
+            self.emit(UiEvent::Item { item: Box::new(item.clone()) });
+        }
+    }
+
+    pub fn agents(&self) -> Vec<Agent> {
+        let running = self.running.lock().unwrap();
+        let items = self.items.lock().unwrap();
+        running
+            .iter()
+            .filter_map(|(id, control)| {
+                let item = items.get(id)?;
+                let run = item.runs.last()?;
+                Some(Agent {
+                    item: id.clone(),
+                    title: item.title.clone(),
+                    step: run.step.clone(),
+                    run: run.n,
+                    pid: control.pid.load(std::sync::atomic::Ordering::Relaxed),
+                })
+            })
+            .filter(|a| a.pid != 0)
+            .collect()
+    }
+
+    pub fn emit_account(&self) {
+        self.emit(UiEvent::Limits { account: account_json(&self.account) });
     }
 
     pub fn update_pipeline(&self, f: impl FnOnce(&mut Pipeline) -> Result<()>) -> Result<()> {
@@ -343,6 +428,15 @@ impl App {
 
     fn schedule(self: &Arc<Self>) {
         let pipeline = self.pipeline();
+        // Hold back new runs while the plan usage is above the threshold.
+        let paused = self.account.paused_reason();
+        if *self.paused.lock().unwrap() != paused {
+            if let Some(why) = &paused {
+                tracing::info!("holding new runs: {why}");
+            }
+            *self.paused.lock().unwrap() = paused.clone();
+            self.emit_account();
+        }
         let mut to_start = vec![];
         {
             let mut items = self.items.lock().unwrap();
@@ -369,7 +463,7 @@ impl App {
                         }
                         _ => false,
                     };
-                    if item.status == Status::Queued && busy < step.max_workers {
+                    if item.status == Status::Queued && busy < step.max_workers && paused.is_none() {
                         busy += 1;
                         let n = item.next_run_number();
                         item.runs.push(Run {
@@ -381,6 +475,7 @@ impl App {
                             resumed_from: item.pending_resume.as_ref().map(|r| r.from_run),
                             session_id: None,
                             cost_usd: None,
+                            tokens: None,
                             transition: None,
                             outcome: None,
                             failed: false,
@@ -510,10 +605,11 @@ impl App {
 
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         let (stop_tx, stop_rx) = oneshot::channel();
+        let pid = Arc::new(std::sync::atomic::AtomicU32::new(0));
         self.running
             .lock()
             .unwrap()
-            .insert(id.to_string(), RunControl { messages: msg_tx, stop: Some(stop_tx) });
+            .insert(id.to_string(), RunControl { messages: msg_tx, stop: Some(stop_tx), pid: pid.clone() });
 
         let spec = RunSpec {
             program: self.claude.clone(),
@@ -522,11 +618,28 @@ impl App {
             initial_prompt: prompt,
             events_path: run_dir.join("events.jsonl"),
             stderr_path: run_dir.join("stderr.log"),
+            pid,
         };
         let item_id = id.to_string();
         let app = self.clone();
         let mut session_recorded = false;
+        let mut meter = TokenMeter::default();
         runner::run(spec, msg_rx, stop_rx, move |event| {
+            if meter.observe(event) {
+                let tokens = meter.total();
+                app.update_item_live(&item_id, |i| {
+                    if let Some(r) = i.run_mut(n) {
+                        r.tokens = Some(tokens);
+                    }
+                });
+            }
+            if event["type"] == "rate_limit_event"
+                && let Some(info) = event.get("rate_limit_info")
+                && app.account.record_limits(info)
+            {
+                app.emit_account();
+                app.wake.notify_one();
+            }
             if !session_recorded
                 && let Some(sid) = event.get("session_id").and_then(Value::as_str) {
                     session_recorded = true;
@@ -797,6 +910,7 @@ mod tests {
             resumed_from: None,
             session_id: None,
             cost_usd: None,
+            tokens: None,
             transition: None,
             outcome: None,
             failed: false,

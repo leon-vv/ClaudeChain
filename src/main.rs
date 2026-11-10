@@ -1,8 +1,10 @@
+mod account;
 mod config;
 mod git;
 mod orchestrator;
 mod runner;
 mod store;
+mod sysmon;
 mod web;
 mod workspace;
 
@@ -44,6 +46,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     let ws = Workspace::new(args.claude);
+    tokio::spawn(ws.clone().monitor_loop());
     let initial = match args.repo {
         Some(repo) => Some((repo, args.data)),
         None => ws.recent().into_iter().next().map(|r| (r.repo, Some(r.data))),

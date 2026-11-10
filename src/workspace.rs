@@ -1,31 +1,19 @@
 //! Which repository is open. The server can start without one and the user
-//! picks (or switches) it from the UI. Recent choices are remembered in
-//! `~/.config/claudechain/state.json`.
+//! picks (or switches) it from the UI. Recent choices are remembered by
+//! `Account`.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result, anyhow};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::broadcast;
 
+use crate::account::{Account, Recent};
 use crate::git;
 use crate::orchestrator::{App, UiEvent};
-use crate::store::{Layout, write_atomic};
-
-const MAX_RECENT: usize = 10;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Recent {
-    pub repo: PathBuf,
-    pub data: PathBuf,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct Saved {
-    #[serde(default)]
-    recent: Vec<Recent>,
-}
+use crate::store::Layout;
+use crate::sysmon::Monitor;
 
 pub struct Workspace {
     claude: String,
@@ -33,14 +21,8 @@ pub struct Workspace {
     current: RwLock<Option<Arc<App>>>,
     /// Serializes open/switch so two requests can't race.
     switching: tokio::sync::Mutex<()>,
-    saved: Mutex<Saved>,
-}
-
-fn state_file() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("claudechain").join("state.json"))
+    pub account: Arc<Account>,
+    pub monitor: Monitor,
 }
 
 pub fn home_dir() -> PathBuf {
@@ -53,18 +35,25 @@ pub fn default_data_dir(repo: &Path) -> PathBuf {
 
 impl Workspace {
     pub fn new(claude: String) -> Arc<Self> {
-        let saved = state_file()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default();
         let (events, _) = broadcast::channel(4096);
         Arc::new(Self {
             claude,
             events,
             current: RwLock::new(None),
             switching: tokio::sync::Mutex::new(()),
-            saved: Mutex::new(saved),
+            account: Account::load(),
+            monitor: Monitor::new(),
         })
+    }
+
+    /// Samples system resources forever (for the Resources page).
+    pub async fn monitor_loop(self: Arc<Self>) {
+        loop {
+            let disk = self.app().map(|a| a.layout.data.clone());
+            let ws = self.clone();
+            let _ = tokio::task::spawn_blocking(move || ws.monitor.sample(disk.as_deref())).await;
+            tokio::time::sleep(crate::sysmon::INTERVAL).await;
+        }
     }
 
     pub fn app(&self) -> Option<Arc<App>> {
@@ -72,7 +61,7 @@ impl Workspace {
     }
 
     pub fn recent(&self) -> Vec<Recent> {
-        self.saved.lock().unwrap().recent.clone()
+        self.account.recent()
     }
 
     /// Opens `repo` (with its data directory), replacing the current one.
@@ -94,7 +83,7 @@ impl Workspace {
                 return Ok(());
             }
         git::exclude_path(&repo, &data).await?;
-        let app = App::new(Layout { repo: repo.clone(), data: data.clone() }, self.claude.clone(), self.events.clone())?;
+        let app = App::new(Layout { repo: repo.clone(), data: data.clone() }, self.claude.clone(), self.events.clone(), self.account.clone())?;
 
         if let Some(old) = self.app() {
             old.close()?;
@@ -102,22 +91,9 @@ impl Workspace {
         tokio::spawn(app.clone().scheduler());
         *self.current.write().unwrap() = Some(app);
         tracing::info!("opened repo {} (data {})", repo.display(), data.display());
-        self.remember(Recent { repo, data });
+        self.account.remember(Recent { repo, data });
         let _ = self.events.send(UiEvent::Workspace);
         Ok(())
-    }
-
-    fn remember(&self, entry: Recent) {
-        let mut saved = self.saved.lock().unwrap();
-        saved.recent.retain(|r| r.repo != entry.repo);
-        saved.recent.insert(0, entry);
-        saved.recent.truncate(MAX_RECENT);
-        if let Some(path) = state_file() {
-            let json = serde_json::to_vec_pretty(&*saved).unwrap_or_default();
-            if let Err(e) = write_atomic(&path, &json) {
-                tracing::warn!("saving {}: {e:#}", path.display());
-            }
-        }
     }
 }
 
