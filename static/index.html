@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ClaudeChain</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <h1>ClaudeChain</h1>
+      <span class="repo" id="repo"></span>
+    </div>
+    <div class="actions">
+      <span class="conn" id="conn" title="Live connection to the server">●</span>
+      <button id="btn-general">General prompt</button>
+      <button id="btn-settings">Settings</button>
+      <button id="btn-add" class="primary">+ Add issue</button>
+    </div>
+  </header>
+
+  <main class="board-wrap">
+    <table class="board" id="board"></table>
+    <p class="empty" id="empty" hidden>No work items yet. Use <b>+ Add issue</b> to paste a GitHub issue URL, <code>#123</code>, or issue text.</p>
+  </main>
+
+  <aside class="inspector" id="inspector" hidden>
+    <div class="insp-head">
+      <div class="insp-title">
+        <div id="insp-item"></div>
+        <div class="insp-meta" id="insp-meta"></div>
+      </div>
+      <div class="insp-controls">
+        <select id="insp-run" title="Runs of this item"></select>
+        <button id="insp-stop">Stop</button>
+        <button id="insp-retry">Retry step</button>
+        <button id="insp-move">Move…</button>
+        <button id="insp-remove" class="danger">Remove</button>
+        <button id="insp-close" class="icon" title="Close">✕</button>
+      </div>
+    </div>
+    <nav class="tabs" id="insp-tabs">
+      <button data-tab="transcript">Transcript</button>
+      <button data-tab="input">Input</button>
+      <button data-tab="output">Output</button>
+      <button data-tab="files">Files</button>
+      <button data-tab="diff">Diff</button>
+    </nav>
+    <section class="insp-body" id="insp-body"></section>
+    <form class="composer" id="composer">
+      <textarea id="composer-text" rows="2" placeholder="Give this agent extra direction…"></textarea>
+      <div class="composer-actions" id="composer-actions"></div>
+    </form>
+  </aside>
+
+  <dialog id="dialog">
+    <form method="dialog" id="dialog-form">
+      <h2 id="dialog-title"></h2>
+      <div id="dialog-body"></div>
+      <p class="error" id="dialog-error"></p>
+      <div class="dialog-actions">
+        <button value="cancel" formnovalidate>Cancel</button>
+        <button value="ok" class="primary" id="dialog-ok">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>
