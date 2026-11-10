@@ -113,11 +113,10 @@ pub async fn run(
                 let Some(line) = line? else { break };
                 let value: Value = serde_json::from_str(&line)
                     .unwrap_or_else(|_| local_event("raw_output", &line));
-                if result.session_id.is_none() {
-                    if let Some(id) = value.get("session_id").and_then(Value::as_str) {
+                if result.session_id.is_none()
+                    && let Some(id) = value.get("session_id").and_then(Value::as_str) {
                         result.session_id = Some(id.to_string());
                     }
-                }
                 if value["type"] == "result" {
                     result.cost_usd = value["total_cost_usd"].as_f64();
                     result.result_text = value["result"].as_str().map(String::from);

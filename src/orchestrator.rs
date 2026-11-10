@@ -479,8 +479,8 @@ impl App {
         let app = self.clone();
         let mut session_recorded = false;
         runner::run(spec, msg_rx, stop_rx, move |event| {
-            if !session_recorded {
-                if let Some(sid) = event.get("session_id").and_then(Value::as_str) {
+            if !session_recorded
+                && let Some(sid) = event.get("session_id").and_then(Value::as_str) {
                     session_recorded = true;
                     let sid = sid.to_string();
                     let _ = app.update_item(&item_id, |i| {
@@ -490,7 +490,6 @@ impl App {
                         Ok(())
                     });
                 }
-            }
             app.emit(UiEvent::RunEvent { item: item_id.clone(), run: n, event: event.clone() });
         })
         .await
@@ -703,4 +702,142 @@ fn resume_prompt(
         notes_section(notes),
         output_section(layout, pipeline, item, step, n),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup(name: &str) -> (Layout, Pipeline, Item) {
+        let root = std::env::temp_dir().join(format!("claudechain-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let layout = Layout { repo: root.clone(), data: root.join("data") };
+        let pipeline = config::load_or_init(&layout.data).unwrap();
+        let now = Utc::now();
+        let item = Item {
+            id: "item-1".into(),
+            number: None,
+            title: "t".into(),
+            url: None,
+            branch: "claudechain/item-1".into(),
+            created: now,
+            step: "build_test".into(),
+            status: Status::Running,
+            status_detail: None,
+            since: now,
+            iteration: 0,
+            approved: false,
+            runs: vec![],
+            pending_notes: vec![],
+            pending_resume: None,
+            base_commit: None,
+            pr_url: None,
+        };
+        (layout, pipeline, item)
+    }
+
+    fn start_run(layout: &Layout, item: &mut Item, step: &str, transition: Option<&str>) -> u32 {
+        let n = item.next_run_number();
+        item.step = step.into();
+        item.status = Status::Running;
+        item.runs.push(Run {
+            n,
+            step: step.into(),
+            model: "m".into(),
+            started: Utc::now(),
+            ended: None,
+            resumed_from: None,
+            session_id: None,
+            cost_usd: None,
+            transition: None,
+            outcome: None,
+            failed: false,
+        });
+        if let Some(t) = transition {
+            store::write_atomic(&layout.transition_file(&item.id, n, step), t.as_bytes()).unwrap();
+        }
+        n
+    }
+
+    fn ok() -> Result<runner::RunResult> {
+        Ok(runner::RunResult::default())
+    }
+
+    #[test]
+    fn next_moves_forward() {
+        let (layout, pipeline, mut item) = setup("forward");
+        let n = start_run(&layout, &mut item, "build_test", Some(r#"{"to":"next","summary":"green"}"#));
+        finish_run(&layout, &pipeline, &mut item, n, ok());
+        assert_eq!((item.step.as_str(), item.status), ("review", Status::Queued));
+        assert_eq!(item.iteration, 0);
+        assert_eq!(item.status_detail.as_deref(), Some("green"));
+        assert!(!item.run(n).unwrap().failed);
+    }
+
+    #[test]
+    fn backward_move_counts_iterations_up_to_the_limit() {
+        let (layout, mut pipeline, mut item) = setup("backward");
+        pipeline.max_iterations = 1;
+        let t = r#"{"to":"implementation","summary":"tests fail"}"#;
+        let n = start_run(&layout, &mut item, "build_test", Some(t));
+        finish_run(&layout, &pipeline, &mut item, n, ok());
+        assert_eq!((item.step.as_str(), item.status, item.iteration), ("implementation", Status::Queued, 1));
+
+        let n = start_run(&layout, &mut item, "build_test", Some(t));
+        finish_run(&layout, &pipeline, &mut item, n, ok());
+        assert_eq!((item.status, item.iteration), (Status::NeedsHuman, 2));
+        assert!(item.status_detail.as_deref().unwrap().contains("Iteration limit"));
+    }
+
+    #[test]
+    fn disallowed_or_missing_transition_needs_human() {
+        let (layout, pipeline, mut item) = setup("invalid");
+        let n = start_run(&layout, &mut item, "build_test", Some(r#"{"to":"triage"}"#));
+        finish_run(&layout, &pipeline, &mut item, n, ok());
+        assert_eq!(item.status, Status::NeedsHuman);
+        assert!(item.run(n).unwrap().failed);
+
+        let n = start_run(&layout, &mut item, "build_test", None);
+        finish_run(&layout, &pipeline, &mut item, n, ok());
+        assert_eq!(item.status, Status::NeedsHuman);
+        assert!(item.status_detail.as_deref().unwrap().contains("without writing transition.json"));
+
+        let n = start_run(&layout, &mut item, "build_test", Some("not json"));
+        finish_run(&layout, &pipeline, &mut item, n, ok());
+        assert!(item.status_detail.as_deref().unwrap().contains("invalid transition.json"));
+    }
+
+    #[test]
+    fn human_transition_and_stop() {
+        let (layout, pipeline, mut item) = setup("human");
+        let n = start_run(&layout, &mut item, "triage", Some(r#"{"to":"human","summary":"unclear"}"#));
+        finish_run(&layout, &pipeline, &mut item, n, ok());
+        assert_eq!(item.status, Status::NeedsHuman);
+        assert_eq!(item.status_detail.as_deref(), Some("Agent asked for a human: unclear"));
+
+        let n = start_run(&layout, &mut item, "triage", Some(r#"{"to":"next"}"#));
+        let stopped = runner::RunResult { stopped: true, ..Default::default() };
+        finish_run(&layout, &pipeline, &mut item, n, Ok(stopped));
+        assert_eq!(item.status, Status::NeedsHuman);
+        assert_eq!(item.step, "triage");
+    }
+
+    #[test]
+    fn next_from_last_step_is_done_and_records_pr() {
+        let (layout, pipeline, mut item) = setup("done");
+        let t = r#"{"to":"next","summary":"opened","pr_url":"https://github.com/o/r/pull/1"}"#;
+        let n = start_run(&layout, &mut item, "pull_request", Some(t));
+        finish_run(&layout, &pipeline, &mut item, n, ok());
+        assert_eq!(item.status, Status::Done);
+        assert_eq!(item.pr_url.as_deref(), Some("https://github.com/o/r/pull/1"));
+    }
+
+    #[test]
+    fn issue_refs() {
+        assert_eq!(git::issue_ref("#12").as_deref(), Some("12"));
+        assert_eq!(git::issue_ref(" 7 ").as_deref(), Some("7"));
+        assert!(git::issue_ref("https://github.com/o/r/issues/3").is_some());
+        assert!(git::issue_ref("Fix the thing\n\nbody").is_none());
+        assert!(git::issue_ref("#").is_none());
+    }
 }

@@ -1,5 +1,11 @@
 # ClaudeChain — design sketch & plan
 
+> Implemented. Differences from this plan: the frontend is plain JavaScript
+> with server-sent events (no htmx/askama); the data directory defaults to
+> `<repo>/.claudechain` and the repo is given with `--repo` instead of in
+> `pipeline.toml`; notes are kept in `item.json` and included in the next run's
+> prompt and `input.json` (no `notes/` folder). See README.md for usage.
+
 A local Rust web app that pulls GitHub issues for **one target repository**
 through a configurable pipeline of agents. Each step has its own model, prompt
 and worker limit. Agents talk to each other only through files in the work

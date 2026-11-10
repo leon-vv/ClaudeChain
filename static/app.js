@@ -234,7 +234,7 @@ function stepCell(it, s) {
     if (it.status === "awaiting_approval") {
       td.append(h("div", { class: "gate" },
         h("button", { class: "small primary", onclick: (e) => { e.stopPropagation(); act(() => api("POST", `/api/items/${it.id}/approve`)); } }, "Approve"),
-        h("button", { class: "small", onclick: (e) => { e.stopPropagation(); moveDialog(it); } }, "Send back…"),
+        h("button", { class: "small", onclick: (e) => { e.stopPropagation(); moveDialog(it, true); } }, "Send back…"),
       ));
     }
     if (it.status_detail && it.status !== "running") {
@@ -441,11 +441,15 @@ function appendTranscriptEvent(ev, initial = false) {
       }
       break;
     }
-    case "result":
+    case "result": {
+      // The result text usually repeats the last assistant message.
+      const lastText = [...box.querySelectorAll(".ev.assistant .body")].pop()?.textContent;
+      const text = ev.result && ev.result.trim() !== lastText?.trim() ? ev.result : null;
       add(h("div", { class: `result-box ${ev.is_error ? "bad" : "ok"}` },
         h("div", { class: "who" }, `Result: ${ev.subtype} · ${ev.num_turns ?? "?"} turns · ${Math.round((ev.duration_ms || 0) / 1000)}s · ≈ ${fmtCost(ev.total_cost_usd)}`),
-        ev.result && h("div", { style: "white-space:pre-wrap" }, ev.result)));
+        text && h("div", { style: "white-space:pre-wrap" }, text)));
       break;
+    }
     case "claudechain":
       if (ev.subtype === "human_message") {
         add(h("div", { class: "ev human" }, h("div", { class: "who" }, "You"), h("div", { style: "white-space:pre-wrap" }, ev.text)));
@@ -595,9 +599,12 @@ function settingsDialog() {
   ], () => api("PUT", "/api/settings", { max_iterations: parseInt(input.value, 10) || 0 }));
 }
 
-function moveDialog(item) {
+function moveDialog(item, back = false) {
+  // "Send back" defaults to the step before the current one.
+  const cur = stepIndex(item.step);
+  const def = back && cur > 0 ? S.pipeline.steps[cur - 1].id : item.step;
   const sel = h("select", {},
-    S.pipeline.steps.map((s) => h("option", { value: s.id, selected: s.id === item.step }, s.name)),
+    S.pipeline.steps.map((s) => h("option", { value: s.id, selected: s.id === def }, s.name)),
     h("option", { value: "done" }, "Done (finish the item)"));
   const note = h("textarea", { rows: 4, placeholder: "Optional note for the agent of that step" });
   dialog(`Move ${item.id}`, [h("label", {}, "Move to step"), sel, h("label", {}, "Note"), note],
