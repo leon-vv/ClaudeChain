@@ -14,7 +14,7 @@
   </script>
   <link rel="stylesheet" href="/style.css">
 </head>
-<body>
+<body class="loading">
   <header class="top">
     <div class="brand">
       <h1>ClaudeChain</h1>
@@ -36,12 +36,22 @@
 
   <main class="board-wrap" id="board-page">
     <table class="board" id="board"></table>
-    <div class="landing" id="no-repo" hidden>
-      <h1>ClaudeChain</h1>
-      <p>No repository is open.</p>
-      <button class="primary" id="btn-open-repo">📁 Select repository</button>
-    </div>
     <p class="empty" id="empty" hidden>No work items yet. Use <b>+ Add issue</b> to paste a GitHub issue URL, <code>#123</code>, or issue text.</p>
+  </main>
+
+  <!-- Landing page, shown instead of the board while no repository is open. -->
+  <main class="landing" id="no-repo" hidden>
+    <div class="landing-card">
+      <div class="landing-logo" aria-hidden="true">⛓</div>
+      <h1>ClaudeChain</h1>
+      <p class="tagline">Run a pipeline of Claude Code agents on the issues of a git repository.</p>
+      <button class="primary" id="btn-open-repo">📁 Open a repository</button>
+      <div class="landing-recent" id="landing-recent" hidden>
+        <h2>Recent repositories</h2>
+        <ul id="landing-recent-list"></ul>
+      </div>
+      <p class="hint">Pick any local git repository. Its pipeline, prompts and work items are kept in <code>&lt;repository&gt;/.claudechain</code> unless you choose another data directory.</p>
+    </div>
   </main>
 
   <aside class="inspector" id="inspector" hidden>

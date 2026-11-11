@@ -176,16 +176,40 @@ td.current { box-shadow: inset 3px 0 0 var(--accent); }
 .empty { color: var(--muted); text-align: center; margin-top: 40px; }
 
 /* ---- Landing page (no repository open) ---- */
-body.no-repo .top, body.no-repo #board, body.no-repo #resources-page { display: none; }
-body.no-repo #board-page { display: block; }
+/* Until the first /api/state answer we don't know which UI to show: show nothing rather than the wrong one. */
+body.loading .top, body.loading main { display: none; }
+body.no-repo .top, body.no-repo #board-page, body.no-repo #resources-page, body.no-repo #inspector { display: none; }
 .landing {
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 12px; min-height: 70vh; text-align: center;
+  display: flex; align-items: center; justify-content: center;
+  min-height: 100vh; padding: 24px; box-sizing: border-box;
 }
 .landing[hidden] { display: none; }
+.landing-card {
+  display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center;
+  width: min(520px, 100%); padding: 40px 32px; box-sizing: border-box;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.10);
+}
+.landing-logo {
+  font-size: 34px; width: 64px; height: 64px; display: flex; align-items: center; justify-content: center;
+  border-radius: 16px; background: var(--accent); color: var(--accent-text);
+}
 .landing h1 { font-size: 32px; margin: 0; }
-.landing p { color: var(--muted); margin: 0 0 8px; }
-.landing button { font-size: 18px; padding: 12px 28px; border-radius: 8px; }
+.landing .tagline { color: var(--muted); margin: 0 0 8px; font-size: 15px; }
+#btn-open-repo { font-size: 18px; padding: 12px 28px; border-radius: 8px; }
+.landing-recent { width: 100%; margin-top: 12px; text-align: left; }
+.landing-recent h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 6px; }
+.landing-recent ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.landing-recent button {
+  width: 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: 8px 12px; border-radius: 8px; text-align: left;
+}
+.landing-recent button .name { font-weight: 600; }
+.landing-recent button small {
+  font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.landing .hint { color: var(--muted); font-size: 12.5px; margin: 12px 0 0; }
 
 /* ---- Inspector ---- */
 .inspector {
