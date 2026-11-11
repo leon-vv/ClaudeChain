@@ -75,7 +75,16 @@ function fmtTok(n) {
   return `${(n / 1e6).toFixed(n < 1e7 ? 2 : 1)}M`;
 }
 const tokTotal = (t) => (t ? t.input + t.output + t.cache_read + t.cache_write : 0);
-const tokTitle = (t) => t ? `input ${t.input.toLocaleString()} · output ${t.output.toLocaleString()} · cache read ${t.cache_read.toLocaleString()} · cache write ${t.cache_write.toLocaleString()}` : "";
+/// Tokens split into read (input: uncached + cached) and write (output + cache write).
+const tokParts = (t) => ({
+  read: t.input + t.cache_read, uncached: t.input, cached: t.cache_read,
+  write: t.output + t.cache_write, output: t.output, cacheWrite: t.cache_write,
+});
+const tokTitle = (t) => {
+  if (!t) return "";
+  const p = tokParts(t), n = (x) => x.toLocaleString();
+  return `read ${n(p.read)}: uncached ${n(p.uncached)} · cached ${n(p.cached)}\nwrite ${n(p.write)}: output ${n(p.output)} · cache write ${n(p.cacheWrite)}`;
+};
 
 /// Plan windows from the latest rate_limit_event, ignoring ones that already reset.
 function planWindows() {
@@ -317,9 +326,9 @@ function stepCell(it, s) {
     td.append(h("div", { class: "chips" }, runs.map((r) =>
       h("span", {
         class: `chip ${runChipClass(r)}`,
-        title: `${shortModel(r.model)} · ${fmtDuration(r)}${r.outcome ? "\n" + r.outcome : ""}`,
+        title: `${shortModel(r.model)} · ${fmtDuration(r)}${tokTotal(r.tokens) > 0 ? `\n${tokTotal(r.tokens).toLocaleString()} tokens\n${tokTitle(r.tokens)}` : ""}${r.outcome ? "\n" + r.outcome : ""}`,
         onclick: (e) => { e.stopPropagation(); openInspector(it.id, r.n); },
-      }, runChipLabel(r)))));
+      }, runChipLabel(r), tokTotal(r.tokens) > 0 && h("span", { class: "tok" }, ` · ${fmtTok(tokTotal(r.tokens))}`)))));
   }
   if (current) {
     const cls = it.status;
@@ -413,12 +422,18 @@ function renderInspectorChrome() {
   const meta = [
     `${stepName(item.step)} · ${STATUS_LABEL[item.status] || item.status}`,
     run && `run #${run.n} ${stepName(run.step)} · ${shortModel(run.model)} · ${fmtDuration(run)}`,
-    run?.tokens && `${fmtTok(tokTotal(run.tokens))} tokens (${fmtTok(run.tokens.output)} out)`,
     run?.tokens?.context && `context ${fmtTok(run.tokens.context)}${run.tokens.context_window ? ` / ${fmtTok(run.tokens.context_window)}` : ""}`,
     run?.cost_usd != null && `≈ ${fmtCost(run.cost_usd)} API-equivalent`,
     run?.resumed_from && `continues #${run.resumed_from}`,
   ].filter(Boolean);
   $("#insp-meta").textContent = meta.join("  ·  ");
+  if (run?.tokens) {
+    const p = tokParts(run.tokens);
+    const total = tokTotal(run.tokens);
+    $("#insp-meta").append(h("div", { class: "insp-tokens", title: `${total.toLocaleString()} tokens\n${tokTitle(run.tokens)}` },
+      `Tokens ${fmtTok(total)} · read ${fmtTok(p.read)} (cached ${fmtTok(p.cached)} · uncached ${fmtTok(p.uncached)})`
+      + ` · write ${fmtTok(p.write)} (output ${fmtTok(p.output)} · cache write ${fmtTok(p.cacheWrite)})`));
+  }
   if (item.status_detail && item.status !== "running") {
     $("#insp-meta").append(h("div", {}, item.status_detail));
   }
@@ -923,6 +938,28 @@ $("#repo").onclick = workspaceDialog;
 $("#btn-open-repo").onclick = workspaceDialog;
 $("#dialog-cancel").onclick = () => $("#dialog").close();
 $("#insp-close").onclick = closeInspector;
+
+// Theme: follows the system until the user picks one with the toggle; the choice is kept in localStorage.
+const THEME_KEY = "claudechain-theme";
+const darkQuery = matchMedia("(prefers-color-scheme: dark)");
+function savedTheme() {
+  try { return localStorage.getItem(THEME_KEY); } catch { return null; }
+}
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  const btn = $("#btn-theme");
+  btn.textContent = t === "dark" ? "☀" : "☾";
+  btn.title = t === "dark" ? "Switch to light mode" : "Switch to dark mode";
+  btn.setAttribute("aria-label", btn.title);
+}
+$("#btn-theme").onclick = () => {
+  const t = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  try { localStorage.setItem(THEME_KEY, t); } catch {}
+  applyTheme(t);
+};
+darkQuery.addEventListener("change", (e) => savedTheme() || applyTheme(e.matches ? "dark" : "light"));
+applyTheme(document.documentElement.dataset.theme || (darkQuery.matches ? "dark" : "light"));
+
 $("#insp-run").onchange = (e) => {
   S.insp.run = e.target.value ? parseInt(e.target.value, 10) : null;
   S.insp.follow = isLiveLatest(S.items.get(S.insp.id), S.insp.run);
