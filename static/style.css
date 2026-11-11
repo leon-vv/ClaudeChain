@@ -113,17 +113,18 @@ textarea { width: 100%; resize: vertical; font-family: var(--mono); font-size: 1
 .board thead th { border-top: 1px solid var(--border); text-align: left; font-weight: normal; }
 .board thead th:first-child { border-top-left-radius: 8px; }
 .board thead th:last-child { border-top-right-radius: 8px; }
-/* height:1px lets the inner div's height:100% fill the whole cell, so the
-   workers/approval row can sit at the bottom even when a neighbour is taller. */
-.step-head { min-width: 170px; height: 1px; }
-.step-head-inner { height: 100%; display: flex; flex-direction: column; }
+/* The header grows with its content (no percentage-height trick), so its
+   controls can never spill over the first item row. */
+.step-head { min-width: 190px; }
+.step-head-inner { display: flex; flex-direction: column; }
 .step-head .name { font-weight: 600; margin-bottom: 6px; display: flex; justify-content: space-between; gap: 6px; }
 .step-head .name .label { cursor: text; }
 .step-head .name input.rename { flex: 1; min-width: 0; font: inherit; font-weight: 600; }
 .step-head .busy { color: var(--muted); font-weight: normal; font-size: 12px; white-space: nowrap; }
-.step-head .row { display: flex; align-items: center; gap: 6px; margin: 4px 0; font-size: 12.5px; color: var(--muted); }
-.step-head .row.bottom { margin-top: auto; padding-top: 4px; justify-content: flex-start; }
-.step-head select { max-width: 100%; flex: 1; font-size: 12.5px; }
+.step-head .row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin: 4px 0; font-size: 12.5px; color: var(--muted); }
+.step-head .row.bottom { padding-top: 4px; justify-content: flex-start; }
+.step-head .row label { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+.step-head select { max-width: 100%; min-width: 0; flex: 1; font-size: 12.5px; }
 .step-head input[type=number] { width: 52px; }
 .corner { min-width: 220px; color: var(--muted); font-size: 12px; }
 
@@ -132,6 +133,9 @@ textarea { width: 100%; resize: vertical; font-family: var(--mono); font-size: 1
 .item-cell .title:hover { color: var(--accent); }
 .item-cell .sub { color: var(--muted); font-size: 12px; display: flex; gap: 8px; flex-wrap: wrap; margin-top: 3px; }
 .item-cell .detail { font-size: 12px; margin-top: 4px; color: var(--muted); }
+.board .row-actions { width: 1%; white-space: nowrap; text-align: right; vertical-align: middle; }
+.row-actions button.danger { color: #fff; background: var(--bad); border-color: var(--bad); }
+.brand #btn-add { align-self: center; }
 
 .cell { cursor: pointer; min-height: 48px; }
 .cell:hover { background: var(--panel-2); }
