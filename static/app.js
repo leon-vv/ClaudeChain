@@ -13,6 +13,7 @@ const S = {
   insp: null, // { id, run, tab, data, file }
   account: null, // { limits, pause_above, paused }
   page: "board",
+  renaming: null, // step id whose header name is being edited
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -235,6 +236,9 @@ function scheduleBoard() {
 function renderBoard() {
   const p = S.pipeline;
   if (!p) return;
+  // A header rename is in progress; re-rendering would destroy its input.
+  // renameStep() calls renderBoard() again when it finishes.
+  if (S.renaming) return;
   const board = $("#board");
   const items = [...S.items.values()].sort((a, b) => a.created.localeCompare(b.created));
   $("#empty").hidden = items.length > 0;
@@ -259,26 +263,56 @@ function stepHeader(s, busy) {
   const models = [...new Set([...S.pipeline.models, s.model])];
   const put = (body) => act(() => api("PUT", `/api/steps/${s.id}`, body));
   return h("th", { class: "step-head" },
-    h("div", { class: "name" }, s.name, h("span", { class: "busy" }, `${busy}/${s.max_workers} busy`)),
-    h("div", { class: "row" },
-      h("select", { title: "Model", onchange: (e) => put({ model: e.target.value }) },
-        models.map((m) => h("option", { value: m, selected: m === s.model }, shortModel(m)))),
-    ),
-    h("div", { class: "row" },
-      h("label", {}, "workers"),
-      h("input", {
-        type: "number", min: 0, max: 32, value: s.max_workers, title: "Maximum agents running this step at once (0 pauses the step)",
-        onchange: (e) => put({ max_workers: Math.max(0, parseInt(e.target.value, 10) || 0) }),
-      }),
-      h("label", { title: "Items wait for your approval before this step runs" },
-        h("input", { type: "checkbox", checked: s.require_approval, onchange: (e) => put({ require_approval: e.target.checked }) }),
-        " approval"),
-    ),
-    h("div", { class: "row" },
-      h("button", { class: "small", onclick: () => editPrompt(s.id, `${s.name} prompt`) }, "✎ prompt"),
-      h("span", { title: "Allowed transitions" }, "→ " + s.allowed_targets.map((t) => (t === "next" || t === "human" ? t : stepName(t))).join(", ")),
+    h("div", { class: "step-head-inner" },
+      h("div", { class: "name" },
+        h("span", { class: "label", title: "Double-click to rename", ondblclick: (e) => renameStep(s, e.currentTarget) }, s.name),
+        h("span", { class: "busy" }, `${busy}/${s.max_workers} busy`)),
+      h("div", { class: "row" },
+        h("select", { title: "Model", onchange: (e) => put({ model: e.target.value }) },
+          models.map((m) => h("option", { value: m, selected: m === s.model }, shortModel(m)))),
+      ),
+      h("div", { class: "row" },
+        h("button", { class: "small", title: `${s.name} prompt`, onclick: () => editPrompt(s.id, `${s.name} prompt`) }, "Edit"),
+      ),
+      h("div", { class: "row bottom" },
+        h("label", {}, "workers"),
+        h("input", {
+          type: "number", min: 0, max: 32, value: s.max_workers, title: "Maximum agents running this step at once (0 pauses the step)",
+          onchange: (e) => put({ max_workers: Math.max(0, parseInt(e.target.value, 10) || 0) }),
+        }),
+        h("label", { title: "Items wait for your approval before this step runs" },
+          h("input", { type: "checkbox", checked: s.require_approval, onchange: (e) => put({ require_approval: e.target.checked }) }),
+          " approval"),
+      ),
     ),
   );
+}
+
+// Swaps a step header's name for a text input. Enter or blur saves, Escape cancels.
+function renameStep(s, label) {
+  if (S.renaming) return;
+  S.renaming = s.id;
+  let finished = false;
+  const input = h("input", { type: "text", class: "rename", value: s.name, maxlength: 80 });
+  const finish = async (save) => {
+    if (finished) return;
+    finished = true;
+    const name = input.value.trim();
+    S.renaming = null;
+    if (save && name && name !== s.name) {
+      // On success the server emits a "pipeline" event, which reloads and re-renders.
+      await act(() => api("PUT", `/api/steps/${s.id}`, { name }));
+    }
+    renderBoard();
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finish(false); }
+  });
+  input.addEventListener("blur", () => finish(true));
+  label.replaceWith(input);
+  input.focus();
+  input.select();
 }
 
 function itemCell(it) {
@@ -648,7 +682,12 @@ async function renderFiles(body) {
     list.append(li);
     if (f === insp.file) show(f, li);
   }
-  body.replaceChildren(h("div", { class: "files" }, list, view));
+  const note = h("p", { class: "files-note" },
+    "Everything in this work item's folder ", h("code", {}, `.claudechain/items/${insp.id}/`), ". ",
+    h("b", {}, "messages/"), " holds the hand-off notes each agent writes; the next agent gets the list of these and is told to read them. ",
+    h("b", {}, "runs/"), " holds per-run logs (input, event stream, stderr, transition). ",
+    "This is not a list of files the agent read, and not the code changes. For those, see the Diff tab.");
+  body.replaceChildren(note, h("div", { class: "files" }, list, view));
 }
 
 async function renderDiff(body) {
@@ -716,12 +755,20 @@ function addDialog() {
 // Workspace ----------------------------------------------------------------
 
 /// Folder picker backed by the server's /api/fs listing.
-function folderBrowser(onPick) {
+/// A single click selects a folder (calls `onSelect`), a double click enters it.
+function folderBrowser(onSelect) {
   const head = h("div", { class: "browser-head" });
   const list = h("ul", {});
   const el = h("div", { class: "browser" }, head, list);
   let hidden = false;
   let current = "";
+  let selected = null;
+  const select = (path, li) => {
+    selected = path;
+    list.querySelectorAll("li.sel").forEach((x) => x.classList.remove("sel"));
+    li.classList.add("sel");
+    onSelect(path);
+  };
   const go = async (path) => {
     let res;
     try {
@@ -738,10 +785,13 @@ function folderBrowser(onPick) {
       h("span", { class: "cur", title: res.path }, res.path, res.git ? " " : "", res.git ? h("span", { class: "badge" }, "git") : ""),
       h("label", { style: "margin:0;display:inline-flex;gap:4px;align-items:center" },
         h("input", { type: "checkbox", checked: hidden, onchange: (e) => { hidden = e.target.checked; go(current); } }), "hidden"),
-      h("button", { class: "small primary", onclick: () => onPick(res.path) }, "Use this folder"),
     );
     list.replaceChildren(...(res.entries.length ? res.entries : [{ name: "(no subfolders)", path: null }]).map((e) =>
-      h("li", { onclick: () => e.path && go(e.path), ondblclick: () => e.path && onPick(e.path) },
+      h("li", {
+        class: e.path && e.path === selected ? "sel" : null,
+        onclick: (ev) => e.path && select(e.path, ev.currentTarget),
+        ondblclick: () => e.path && go(e.path),
+      },
         h("span", {}, e.path ? "📁 " : "", e.name), e.git ? h("span", { class: "badge" }, "git") : "")));
   };
   return { el, go };
@@ -753,12 +803,20 @@ function workspaceDialog() {
   const updatePlaceholder = () => (data.placeholder = repo.value.trim() ? `default: ${repo.value.trim().replace(/\/$/, "")}/.claudechain` : "default: <repository>/.claudechain");
   repo.oninput = updatePlaceholder;
   updatePlaceholder();
+  // Clicking a folder fills the most recently focused input (Repository by default).
   let target = repo;
+  const setTarget = (input) => {
+    target = input;
+    repo.classList.toggle("target", input === repo);
+    data.classList.toggle("target", input === data);
+  };
+  repo.addEventListener("focus", () => setTarget(repo));
+  data.addEventListener("focus", () => setTarget(data));
+  setTarget(repo);
   const browser = folderBrowser((path) => {
     target.value = path;
     updatePlaceholder();
   });
-  const browse = (input) => h("button", { onclick: () => { target = input; browser.go(input.value.trim() || (input === data ? repo.value.trim() : "")); } }, "Browse…");
   const recent = S.recent.length
     ? h("div", {}, h("label", {}, "Recent"), h("div", { class: "recent" }, S.recent.map((r) =>
         h("button", { onclick: () => { repo.value = r.repo; data.value = r.data === `${r.repo}/.claudechain` ? "" : r.data; updatePlaceholder(); } },
@@ -767,9 +825,9 @@ function workspaceDialog() {
   dialog("Open repository", [
     h("p", { class: "help" }, "ClaudeChain works on one git repository at a time. Its pipeline, prompts, work items and worktrees are kept in the data directory, so each repository keeps its own setup. Switching is only possible while no agents are running."),
     recent,
-    h("label", {}, "Repository"), h("div", { class: "field" }, repo, browse(repo)),
-    h("label", {}, "Data directory (optional)"), h("div", { class: "field" }, data, browse(data)),
     browser.el,
+    h("label", {}, "Repository"), h("div", { class: "field" }, repo),
+    h("label", {}, "Data directory (optional)"), h("div", { class: "field" }, data),
   ], () => api("POST", "/api/workspace", { repo: repo.value, data: data.value || null }), "Open", true);
   browser.go(S.repo ? S.repo.replace(/\/[^/]+\/?$/, "") || "/" : "");
 }
@@ -938,6 +996,54 @@ $("#repo").onclick = workspaceDialog;
 $("#btn-open-repo").onclick = workspaceDialog;
 $("#dialog-cancel").onclick = () => $("#dialog").close();
 $("#insp-close").onclick = closeInspector;
+
+// Inspector width: drag the left edge to resize; the width is kept in localStorage.
+const INSP_WIDTH_KEY = "claudechain-inspector-width";
+const INSP_MIN_WIDTH = 360;
+function clampInspWidth(w) {
+  return Math.round(Math.max(Math.min(INSP_MIN_WIDTH, window.innerWidth), Math.min(w, window.innerWidth)));
+}
+function applyInspWidth(w) {
+  $("#inspector").style.width = w == null ? "" : clampInspWidth(w) + "px";
+}
+function savedInspWidth() {
+  let v = null;
+  try { v = parseInt(localStorage.getItem(INSP_WIDTH_KEY), 10); } catch {}
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+applyInspWidth(savedInspWidth());
+{
+  const handle = $("#insp-resizer");
+  handle.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    handle.classList.add("dragging");
+    document.body.classList.add("resizing");
+  });
+  handle.addEventListener("pointermove", (e) => {
+    if (!handle.hasPointerCapture(e.pointerId)) return;
+    applyInspWidth(window.innerWidth - e.clientX);
+  });
+  const end = (e) => {
+    if (!handle.hasPointerCapture(e.pointerId)) return;
+    handle.releasePointerCapture(e.pointerId);
+    handle.classList.remove("dragging");
+    document.body.classList.remove("resizing");
+    const w = parseInt($("#inspector").style.width, 10);
+    if (Number.isFinite(w)) try { localStorage.setItem(INSP_WIDTH_KEY, String(w)); } catch {}
+  };
+  handle.addEventListener("pointerup", end);
+  handle.addEventListener("pointercancel", end);
+  handle.addEventListener("dblclick", () => {
+    try { localStorage.removeItem(INSP_WIDTH_KEY); } catch {}
+    applyInspWidth(null); // back to the CSS default min(920px, 100vw)
+  });
+}
+window.addEventListener("resize", () => {
+  const w = savedInspWidth();
+  if (w != null) applyInspWidth(w); // re-clamp to the new window size
+});
 
 // Theme: follows the system until the user picks one with the toggle; the choice is kept in localStorage.
 const THEME_KEY = "claudechain-theme";
