@@ -68,6 +68,8 @@ const stepName = (id) => (id === "done" ? "Done" : stepById(id)?.name ?? id);
 const stepIndex = (id) => S.pipeline.steps.findIndex((s) => s.id === id);
 const shortModel = (m) => m.replace(/^claude-/, "");
 const fmtCost = (c) => (c == null ? "" : `$${c.toFixed(2)}`);
+/// CPU in percent of one core (an agent tree can use several cores, so >100%).
+const fmtCpu = (c) => (c == null ? "" : `${Math.round(c)}%`);
 
 function fmtTok(n) {
   if (n == null) return "";
@@ -377,9 +379,19 @@ function stepCell(it, s) {
   }
   if (current) {
     const cls = it.status;
-    const live = cls === "running" ? it.runs[it.runs.length - 1]?.tokens : null;
+    const liveRun = cls === "running" ? it.runs[it.runs.length - 1] : null;
+    const live = liveRun?.tokens;
     td.append(h("div", { class: `state ${cls}${cls === "running" ? " pulse" : ""}`, title: tokTitle(live) },
       STATUS_LABEL[cls], live ? ` · ${fmtTok(tokTotal(live))}` : ""));
+    const u = liveRun && !liveRun.ended ? liveRun.usage : null;
+    if (u) {
+      td.append(h("div", {
+        class: "usage",
+        title: `Agent and all its sub-processes (${u.processes} process${u.processes === 1 ? "" : "es"})\nCPU in % of one core · peak ${fmtCpu(u.cpu_max)}\nMemory peak ${fmtBytes(u.rss_max)}`,
+      },
+        h("span", { class: "info" }, `CPU ${fmtCpu(u.cpu)}`),
+        h("span", { class: "info" }, fmtBytes(u.rss))));
+    }
     if (it.status === "awaiting_approval") {
       td.append(h("div", { class: "gate" },
         h("button", { class: "small primary", onclick: (e) => { e.stopPropagation(); act(() => api("POST", `/api/items/${it.id}/approve`)); } }, "Approve"),
@@ -669,6 +681,9 @@ function renderOutput(body, d) {
       ["Started", new Date(r.started).toLocaleString()],
       ["Duration", fmtDuration(r)],
       ["Cost", r.cost_usd != null ? `≈ ${fmtCost(r.cost_usd)} API-equivalent (subscription)` : null],
+      ["CPU" + (r.ended ? " (last)" : ""), r.usage ? `${fmtCpu(r.usage.cpu)} of one core · peak ${fmtCpu(r.usage.cpu_max)}` : null],
+      ["Memory" + (r.ended ? " (last)" : ""), r.usage ? `${fmtBytes(r.usage.rss)} · peak ${fmtBytes(r.usage.rss_max)}` : null],
+      ["Processes" + (r.ended ? " (last)" : ""), r.usage ? `${r.usage.processes} (agent and sub-processes)` : null],
     ]),
     h("h3", {}, "Transition"), h("pre", {}, d.transition ?? "(not written)"),
     h("h3", {}, "Message file"), h("pre", { style: "max-height:none" }, d.message ?? "(not written)"),

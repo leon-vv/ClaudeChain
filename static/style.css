@@ -162,6 +162,11 @@ td.current { box-shadow: inset 3px 0 0 var(--accent); }
 .pulse::before { content: "● "; animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .2; } }
 .cell .last { font-size: 11.5px; color: var(--muted); margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.cell .usage { display: flex; gap: 4px; margin-top: 4px; }
+.cell .usage .info {
+  font-size: 11px; color: var(--muted); background: var(--panel-2); border-radius: 4px; padding: 0 5px;
+  white-space: nowrap; font-variant-numeric: tabular-nums;
+}
 .cell .gate { display: flex; gap: 4px; margin-top: 6px; }
 .empty { color: var(--muted); text-align: center; margin-top: 40px; }
 

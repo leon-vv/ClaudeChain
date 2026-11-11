@@ -52,6 +52,9 @@ impl Workspace {
             let disk = self.app().map(|a| a.layout.data.clone());
             let ws = self.clone();
             let _ = tokio::task::spawn_blocking(move || ws.monitor.sample(disk.as_deref())).await;
+            if let Some(app) = self.app() {
+                app.record_usage(&self.monitor);
+            }
             tokio::time::sleep(crate::sysmon::INTERVAL).await;
         }
     }

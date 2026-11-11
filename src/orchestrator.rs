@@ -183,6 +183,23 @@ impl App {
             .collect()
     }
 
+    /// Stores the latest CPU/memory of each running agent's process tree
+    /// (including sub-processes) on its run. Called after every sysmon
+    /// sample; kept in memory and saved with the run when it finishes, so
+    /// finished runs keep their last values. When the tree is gone (or on
+    /// systems without /proc) the previous value is left as is.
+    pub fn record_usage(&self, monitor: &crate::sysmon::Monitor) {
+        let now = Utc::now();
+        for agent in self.agents() {
+            let Some(tree) = monitor.tree(agent.pid) else { continue };
+            self.update_item_live(&agent.item, |i| {
+                if let Some(r) = i.run_mut(agent.run).filter(|r| r.ended.is_none()) {
+                    r.usage.get_or_insert_with(Default::default).record(tree.cpu, tree.rss, tree.processes, now);
+                }
+            });
+        }
+    }
+
     pub fn emit_account(&self) {
         self.emit(UiEvent::Limits { account: account_json(&self.account) });
     }
@@ -476,6 +493,7 @@ impl App {
                             session_id: None,
                             cost_usd: None,
                             tokens: None,
+                            usage: None,
                             transition: None,
                             outcome: None,
                             failed: false,
@@ -911,6 +929,7 @@ mod tests {
             session_id: None,
             cost_usd: None,
             tokens: None,
+            usage: None,
             transition: None,
             outcome: None,
             failed: false,
