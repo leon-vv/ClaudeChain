@@ -178,28 +178,33 @@ function renderTokens() {
   const day = all.filter((r) => new Date(r.started) >= dayAgo);
   const tAll = sumTokens(all), tDay = sumTokens(day);
 
-  // Tokens per hour over the last 24 hours (attributed to the hour a run started).
-  const hours = Array.from({ length: 24 }, (_, i) => {
-    const start = new Date(Date.now() - (23 - i) * 36e5);
-    start.setMinutes(0, 0, 0);
-    return { start, tokens: 0, output: 0 };
-  });
+  // Tokens per 15 minutes over the last 24 hours (attributed to the quarter-hour a run started).
+  // Epoch-aligned quarters match local quarter-hours: time-zone offsets are multiples of 15 minutes.
+  const Q = 9e5;
+  const base = Math.floor(Date.now() / Q) * Q;
+  const buckets = Array.from({ length: 96 }, (_, i) => ({ start: new Date(base - (95 - i) * Q), tokens: 0, output: 0 }));
   for (const r of day) {
     const t = new Date(r.started);
-    const b = hours.findLast((x) => x.start <= t);
+    const b = buckets.findLast((x) => x.start <= t);
     if (b && r.tokens) {
       b.tokens += tokTotal(r.tokens);
       b.output += r.tokens.output;
     }
   }
-  const maxHour = Math.max(1, ...hours.map((x) => x.tokens));
-  const chart = h("div", { class: "bars" }, hours.map((x) =>
-    h("div", { class: "bar", title: `${x.start.getHours()}:00: ${x.tokens.toLocaleString()} tokens (${x.output.toLocaleString()} output)` },
-      h("span", { style: `height:${(x.tokens / maxHour) * 100}%` }),
-      h("label", {}, x.start.getHours() % 3 === 0 ? String(x.start.getHours()).padStart(2, "0") : ""))));
+  const hm = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  const maxBucket = Math.max(1, ...buckets.map((x) => x.tokens));
+  const chart = h("div", { class: "bars" }, buckets.map((x) =>
+    h("div", { class: "bar", title: `${hm(x.start)}–${hm(new Date(x.start.getTime() + Q))}: ${x.tokens.toLocaleString()} tokens (${x.output.toLocaleString()} output)` },
+      h("span", { style: `height:${(x.tokens / maxBucket) * 100}%` }),
+      h("label", {}, x.start.getMinutes() === 0 && x.start.getHours() % 3 === 0 ? String(x.start.getHours()).padStart(2, "0") : ""))));
 
-  const row = (name, t) => [name, t.runs, h("span", { title: tokTitle(t) }, fmtTok(t.total)), fmtTok(t.output), fmtTok(Math.round(t.total / Math.max(1, t.runs))), fmtSecs(t.secs / Math.max(1, t.runs)), `$${t.cost.toFixed(2)}`];
-  const head = ["", "Runs", "Tokens", "Output", "Per run", "Avg time", "≈ API $"];
+  const row = (name, t) => {
+    const inp = t.input + t.cache_read + t.cache_write;
+    return [name, t.runs, h("span", { title: tokTitle(t) }, fmtTok(t.total)), fmtTok(inp),
+      inp ? `${fmtTok(t.cache_read)} (${Math.round((t.cache_read / inp) * 100)}%)` : fmtTok(t.cache_read),
+      fmtTok(t.output), fmtTok(Math.round(t.total / Math.max(1, t.runs))), fmtSecs(t.secs / Math.max(1, t.runs)), `$${t.cost.toFixed(2)}`];
+  };
+  const head = ["", "Runs", "Total tokens", "Input", "Cached", "Output", "Avg per run", "Avg time", "≈ API $"];
   const steps = groupBy(all, (r) => r.step).sort((a, b) => stepIndex(a[0]) - stepIndex(b[0]));
   const models = groupBy(all, (r) => r.model);
   const items = groupBy(all, (r) => r.item.id).slice(0, 10);
@@ -211,7 +216,7 @@ function renderTokens() {
       stat("Cache reads", tAll.total ? `${Math.round((tAll.cache_read / tAll.total) * 100)}%` : "–", "of all tokens; cheapest kind"),
       stat("≈ API-equivalent", `$${tAll.cost.toFixed(2)}`, "covered by your subscription"),
     ),
-    h("h3", {}, "Tokens per hour, last 24 hours"), chart,
+    h("h3", {}, "Tokens per 15 minutes, last 24 hours"), chart,
     h("div", { class: "tables" },
       h("div", { class: "table-wrap" }, h("h3", {}, "By step"), table(["Step", ...head.slice(1)], steps.map(([k, t]) => row(stepName(k), t)))),
       h("div", { class: "table-wrap" }, h("h3", {}, "By model"), table(["Model", ...head.slice(1)], models.map(([k, t]) => row(shortModel(k), t)))),
@@ -220,7 +225,7 @@ function renderTokens() {
         return row(h("a", { href: "#", onclick: (e) => { e.preventDefault(); showPage("board"); openInspector(k, it?.runs.at(-1)?.n); } }, it?.title || k), t);
       }))),
     ),
-    h("p", { class: "muted small" }, "Tokens = input + output + cache reads + cache writes, as reported by Claude Code. Cache reads are much cheaper than other input and count less toward plan limits."),
+    h("p", { class: "muted small" }, "Total tokens = input + output. Input includes cache reads and cache writes; Cached = cache reads, shown as a share of input. As reported by Claude Code. Cache reads are much cheaper than other input and count less toward plan limits."),
   ));
 }
 
