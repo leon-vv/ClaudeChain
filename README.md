@@ -33,7 +33,7 @@ Options: `--repo <path>` and `--data <dir>` to open a repository directly,
 
 ## Using it
 
-- **Pipeline** (or *Edit pipeline…* on the board): add, remove, rename and
+- **Pipeline** (or *Edit pipeline details…* on the board): add, remove, rename and
   reorder steps, and set per step the model, workers, approval, permission
   mode, tools and allowed transitions ("next", "human", or any other step).
   New steps get a starter prompt to edit from their column header. A step can

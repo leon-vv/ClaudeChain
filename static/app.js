@@ -245,7 +245,7 @@ function renderBoard() {
   const head = h("tr", {},
     h("th", { class: "corner" }, `${items.length} item${items.length === 1 ? "" : "s"}`,
       h("div", {}, `max ${p.max_iterations} bounces per item`),
-      h("button", { class: "small", style: "margin-top:6px", onclick: pipelineDialog }, "Edit pipeline…")),
+      h("button", { class: "small", style: "margin-top:6px", onclick: pipelineDialog }, "Edit pipeline details…")),
     p.steps.map((s) => stepHeader(s, busy[s.id] || 0)),
   );
   const rows = items.map((it) => h("tr", {},
