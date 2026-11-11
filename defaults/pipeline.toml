@@ -9,42 +9,26 @@ models = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fa
 
 [[step]]
 id = "triage"
-name = "Triage"
+name = "Triage & Context"
 model = "claude-haiku-5-5"
 max_workers = 2
 allowed_targets = ["next", "human"]
 tools = ["Read", "Grep", "Glob", "Bash", "Write"]
 
 [[step]]
-id = "breakdown"
-name = "Work breakdown"
-model = "claude-opus-5-5"
-max_workers = 2
-allowed_targets = ["next", "triage", "human"]
-tools = ["Read", "Grep", "Glob", "Bash", "Write"]
-
-[[step]]
 id = "implementation"
 name = "Implementation"
-model = "claude-sonnet-5-5"
+model = "claude-opus-5-5"
 max_workers = 3
-allowed_targets = ["next", "breakdown", "human"]
+allowed_targets = ["next", "triage", "human"]
 tools = ["Read", "Grep", "Glob", "Bash", "Write", "Edit"]
 
 [[step]]
 id = "build_test"
 name = "Build & test"
-model = "claude-sonnet-5-5"
+model = "claude-haiku-5-5"
 max_workers = 1
 allowed_targets = ["next", "implementation", "human"]
-tools = ["Read", "Grep", "Glob", "Bash", "Write"]
-
-[[step]]
-id = "review"
-name = "Review"
-model = "claude-opus-5-5"
-max_workers = 2
-allowed_targets = ["next", "implementation", "breakdown", "human"]
 tools = ["Read", "Grep", "Glob", "Bash", "Write"]
 
 [[step]]

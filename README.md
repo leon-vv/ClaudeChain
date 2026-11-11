@@ -1,8 +1,9 @@
 # ClaudeChain
 
 A local web app that runs GitHub issues through a pipeline of Claude Code
-agents: Triage → Work breakdown → Implementation → Build & test → Review →
-Pull request. Each step has its own prompt, model and worker limit. Agents talk
+agents, by default Triage & Context → Implementation → Build & test → Pull
+request. Each step has its own prompt, model and worker limit, and steps can be
+added from a list of preset stages in the pipeline editor. Agents talk
 only through files, and each one decides where the work goes next: forward,
 back to an earlier step, or to you.
 

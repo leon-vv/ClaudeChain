@@ -7,7 +7,8 @@ Publish the work.
 - Open a pull request with `gh pr create`. Use a clear title and a body that
   summarizes the change, how it was tested, and includes `Closes #<issue number>`
   when the item has an issue number.
-- Use the earlier messages (breakdown, build & test, review) for the PR body.
+- Use the earlier messages (triage & context, implementation, build & test) for
+  the PR body.
 
 Include the PR URL in your message file and in the transition file:
 

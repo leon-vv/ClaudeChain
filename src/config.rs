@@ -165,3 +165,27 @@ pub fn write_prompt(data: &Path, id: &str, text: &str) -> Result<()> {
     std::fs::create_dir_all(data.join("prompts"))?;
     write_atomic(&prompt_path(data, id), text.as_bytes())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_pipeline_is_valid_and_has_four_steps() {
+        let p: Pipeline = toml::from_str(DEFAULT_PIPELINE).unwrap();
+        p.validate().unwrap();
+        let steps: Vec<(&str, &str)> = p.steps.iter().map(|s| (s.id.as_str(), s.model.as_str())).collect();
+        assert_eq!(
+            steps,
+            [
+                ("triage", "claude-haiku-5-5"),
+                ("implementation", "claude-opus-5-5"),
+                ("build_test", "claude-haiku-5-5"),
+                ("pull_request", "claude-haiku-5-5"),
+            ]
+        );
+        for s in &p.steps {
+            assert!(DEFAULT_PROMPTS.iter().any(|(id, _)| *id == s.id), "no default prompt for {}", s.id);
+        }
+    }
+}
