@@ -755,12 +755,20 @@ function addDialog() {
 // Workspace ----------------------------------------------------------------
 
 /// Folder picker backed by the server's /api/fs listing.
-function folderBrowser(onPick) {
+/// A single click selects a folder (calls `onSelect`), a double click enters it.
+function folderBrowser(onSelect) {
   const head = h("div", { class: "browser-head" });
   const list = h("ul", {});
   const el = h("div", { class: "browser" }, head, list);
   let hidden = false;
   let current = "";
+  let selected = null;
+  const select = (path, li) => {
+    selected = path;
+    list.querySelectorAll("li.sel").forEach((x) => x.classList.remove("sel"));
+    li.classList.add("sel");
+    onSelect(path);
+  };
   const go = async (path) => {
     let res;
     try {
@@ -777,10 +785,13 @@ function folderBrowser(onPick) {
       h("span", { class: "cur", title: res.path }, res.path, res.git ? " " : "", res.git ? h("span", { class: "badge" }, "git") : ""),
       h("label", { style: "margin:0;display:inline-flex;gap:4px;align-items:center" },
         h("input", { type: "checkbox", checked: hidden, onchange: (e) => { hidden = e.target.checked; go(current); } }), "hidden"),
-      h("button", { class: "small primary", onclick: () => onPick(res.path) }, "Use this folder"),
     );
     list.replaceChildren(...(res.entries.length ? res.entries : [{ name: "(no subfolders)", path: null }]).map((e) =>
-      h("li", { onclick: () => e.path && go(e.path), ondblclick: () => e.path && onPick(e.path) },
+      h("li", {
+        class: e.path && e.path === selected ? "sel" : null,
+        onclick: (ev) => e.path && select(e.path, ev.currentTarget),
+        ondblclick: () => e.path && go(e.path),
+      },
         h("span", {}, e.path ? "📁 " : "", e.name), e.git ? h("span", { class: "badge" }, "git") : "")));
   };
   return { el, go };
@@ -792,12 +803,20 @@ function workspaceDialog() {
   const updatePlaceholder = () => (data.placeholder = repo.value.trim() ? `default: ${repo.value.trim().replace(/\/$/, "")}/.claudechain` : "default: <repository>/.claudechain");
   repo.oninput = updatePlaceholder;
   updatePlaceholder();
+  // Clicking a folder fills the most recently focused input (Repository by default).
   let target = repo;
+  const setTarget = (input) => {
+    target = input;
+    repo.classList.toggle("target", input === repo);
+    data.classList.toggle("target", input === data);
+  };
+  repo.addEventListener("focus", () => setTarget(repo));
+  data.addEventListener("focus", () => setTarget(data));
+  setTarget(repo);
   const browser = folderBrowser((path) => {
     target.value = path;
     updatePlaceholder();
   });
-  const browse = (input) => h("button", { onclick: () => { target = input; browser.go(input.value.trim() || (input === data ? repo.value.trim() : "")); } }, "Browse…");
   const recent = S.recent.length
     ? h("div", {}, h("label", {}, "Recent"), h("div", { class: "recent" }, S.recent.map((r) =>
         h("button", { onclick: () => { repo.value = r.repo; data.value = r.data === `${r.repo}/.claudechain` ? "" : r.data; updatePlaceholder(); } },
@@ -806,9 +825,9 @@ function workspaceDialog() {
   dialog("Open repository", [
     h("p", { class: "help" }, "ClaudeChain works on one git repository at a time. Its pipeline, prompts, work items and worktrees are kept in the data directory, so each repository keeps its own setup. Switching is only possible while no agents are running."),
     recent,
-    h("label", {}, "Repository"), h("div", { class: "field" }, repo, browse(repo)),
-    h("label", {}, "Data directory (optional)"), h("div", { class: "field" }, data, browse(data)),
     browser.el,
+    h("label", {}, "Repository"), h("div", { class: "field" }, repo),
+    h("label", {}, "Data directory (optional)"), h("div", { class: "field" }, data),
   ], () => api("POST", "/api/workspace", { repo: repo.value, data: data.value || null }), "Open", true);
   browser.go(S.repo ? S.repo.replace(/\/[^/]+\/?$/, "") || "/" : "");
 }

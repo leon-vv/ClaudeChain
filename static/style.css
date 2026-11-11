@@ -250,12 +250,14 @@ dialog #dialog-body { max-height: 72vh; overflow: auto; }
 .recent { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
 .recent button { text-align: left; font-family: var(--mono); font-size: 12px; }
 .recent button small { color: var(--muted); display: block; }
-.browser { border: 1px solid var(--border); border-radius: 8px; margin-top: 10px; }
+.browser { border: 1px solid var(--border); border-radius: 8px; margin: 4px 0 10px; }
 .browser-head { display: flex; gap: 6px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--border); background: var(--panel-2); flex-wrap: wrap; }
 .browser-head .cur { font-family: var(--mono); font-size: 12px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .browser ul { list-style: none; margin: 0; padding: 4px; max-height: 260px; overflow: auto; font-family: var(--mono); font-size: 12.5px; }
 .browser li { padding: 3px 8px; border-radius: 4px; cursor: pointer; display: flex; justify-content: space-between; }
 .browser li:hover { background: var(--panel-2); color: var(--accent); }
+.browser li.sel, .browser li.sel:hover { background: var(--accent); color: var(--accent-text); }
+.field input.target { border-color: var(--accent); }
 .badge { font-size: 10.5px; border-radius: 8px; padding: 0 6px; background: var(--ok-bg); color: var(--ok); font-family: system-ui, sans-serif; }
 
 /* Pipeline editor */
