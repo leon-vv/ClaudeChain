@@ -22,8 +22,8 @@ back to an earlier step, or to you.
 cargo run --release
 ```
 
-Open http://127.0.0.1:7878 and pick a repository. Its pipeline, prompts and
-items are stored in `<repo>/.claudechain`, which is added to
+Open http://127.0.0.1:7878 and pick a repository. By default its pipeline, prompts
+and items are stored in `<repo>/.claudechain`, which is added to
 `.git/info/exclude`. Recent repositories are remembered in
 `~/.config/claudechain/state.json`.
 
@@ -33,7 +33,7 @@ Options: `--repo <path>`, `--data <dir>`, `--port`, `--host`, `--claude <path>`.
 
 - **+ Add issue**: a GitHub issue URL, `#123`, or plain text.
 - **Pipeline**: add, reorder and configure steps (model, workers, approval,
-  tools, allowed transitions). Column headers edit each step's prompt. Setting
+  permission mode, tools, allowed transitions). Column headers edit each step's prompt. Setting
   workers to 0 pauses a step.
 - **Click a cell** to inspect a run: live transcript, exact input, output files
   and the branch diff. From there you can message a running agent, continue a
@@ -52,13 +52,14 @@ Options: `--repo <path>`, `--data <dir>`, `--port`, `--host`, `--claude <path>`.
   worktrees/<id>/      git worktree on branch claudechain/<id>
 ```
 
-Each run starts `claude -p` in the item's worktree with
-`--permission-mode dontAsk` and only the step's tools. The agent writes a
+Each run starts `claude -p` in the item's worktree with the step's permission
+mode (default `dontAsk`) and only the step's tools, without loading your own
+MCP servers. The agent writes a
 message and a `transition.json` (`{"to": "next" | "<step id>" | "human", ...}`),
 and ClaudeChain moves the item. A missing transition, a stop, or too many
 backward moves (`max_iterations`) hands the item to you. Agents stop with
 ClaudeChain and are requeued on the next start.
 
-The server listens on localhost only. It rejects non-local Host headers and
+By default the server listens on localhost only. It rejects non-local Host headers and
 requires an `x-claudechain` header on changes, so other websites can't drive
 it from your browser.
