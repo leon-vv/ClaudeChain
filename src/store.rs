@@ -137,6 +137,37 @@ pub struct PendingResume {
     pub message: String,
 }
 
+/// CPU and memory of a run's agent process tree (the agent plus every
+/// sub-process it started, e.g. cargo). Updated while the run is going; after
+/// it ends this holds the last values seen.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RunUsage {
+    /// Latest CPU, in percent of one core (can exceed 100).
+    pub cpu: f64,
+    /// Latest resident memory in bytes.
+    pub rss: u64,
+    /// Latest number of processes in the tree.
+    pub processes: usize,
+    #[serde(default)]
+    pub cpu_max: f64,
+    #[serde(default)]
+    pub rss_max: u64,
+    #[serde(default)]
+    pub at: Option<DateTime<Utc>>,
+}
+
+impl RunUsage {
+    /// Records a new sample, keeping the peaks.
+    pub fn record(&mut self, cpu: f64, rss: u64, processes: usize, at: DateTime<Utc>) {
+        self.cpu = cpu;
+        self.rss = rss;
+        self.processes = processes;
+        self.cpu_max = self.cpu_max.max(cpu);
+        self.rss_max = self.rss_max.max(rss);
+        self.at = Some(at);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Run {
     pub n: u32,
@@ -154,6 +185,9 @@ pub struct Run {
     pub cost_usd: Option<f64>,
     #[serde(default)]
     pub tokens: Option<Tokens>,
+    /// CPU and memory of the agent's process tree; last values once ended.
+    #[serde(default)]
+    pub usage: Option<RunUsage>,
     #[serde(default)]
     pub transition: Option<Transition>,
     /// Human-readable result: where the item went, or why it stopped.
@@ -303,6 +337,23 @@ mod tests {
         json!({"type": "assistant", "message": {"id": id, "usage": {
             "input_tokens": input, "cache_read_input_tokens": cache_read,
             "cache_creation_input_tokens": 10, "output_tokens": output}}})
+    }
+
+    #[test]
+    fn run_usage_keeps_last_and_peak_and_old_runs_load() {
+        let mut u = RunUsage::default();
+        let t = Utc::now();
+        u.record(150.0, 2_000, 5, t);
+        u.record(20.0, 3_000, 2, t);
+        assert_eq!((u.cpu, u.rss, u.processes), (20.0, 3_000, 2));
+        assert_eq!((u.cpu_max, u.rss_max, u.at), (150.0, 3_000, Some(t)));
+
+        // Run files written before usage tracking still load.
+        let old = json!({"n": 1, "step": "triage", "model": "m", "started": t});
+        let run: Run = serde_json::from_value(old).unwrap();
+        assert!(run.usage.is_none());
+        let back: Run = serde_json::from_value(serde_json::to_value(Run { usage: Some(u.clone()), ..run }).unwrap()).unwrap();
+        assert_eq!(back.usage, Some(u));
     }
 
     #[test]
