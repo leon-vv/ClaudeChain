@@ -949,7 +949,7 @@ mod tests {
         let (layout, pipeline, mut item) = setup("forward");
         let n = start_run(&layout, &mut item, "build_test", Some(r#"{"to":"next","summary":"green"}"#));
         finish_run(&layout, &pipeline, &mut item, n, ok());
-        assert_eq!((item.step.as_str(), item.status), ("review", Status::Queued));
+        assert_eq!((item.step.as_str(), item.status), ("pull_request", Status::Queued));
         assert_eq!(item.iteration, 0);
         assert_eq!(item.status_detail.as_deref(), Some("green"));
         assert!(!item.run(n).unwrap().failed);

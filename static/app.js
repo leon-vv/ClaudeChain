@@ -884,6 +884,58 @@ function slug(name) {
   return name.toLowerCase().trim().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "step";
 }
 
+// Preset stages offered by "Choose default stage" in the pipeline editor. Picking one
+// overwrites every setting of the step. Targets naming steps that are not in the
+// pipeline are dropped. The ids match the default prompts written for a new data dir.
+const READ_TOOLS = ["Read", "Grep", "Glob", "Bash", "Write"];
+const EDIT_TOOLS = [...READ_TOOLS, "Edit"];
+const STEP_PRESETS = [
+  { id: "triage", name: "Triage & Context", model: "claude-haiku-5-5", max_workers: 2, require_approval: false,
+    allowed_targets: ["next", "human"], tools: READ_TOOLS, permission_mode: "dontAsk",
+    desc: "Checks the issue is actionable and collects files, snippets and test status for the implementer." },
+  { id: "breakdown", name: "Work breakdown", model: "claude-opus-5-5", max_workers: 2, require_approval: false,
+    allowed_targets: ["next", "triage", "human"], tools: READ_TOOLS, permission_mode: "dontAsk",
+    desc: "Turns the issue into a concrete step-by-step implementation plan." },
+  { id: "implementation", name: "Implementation", model: "claude-opus-5-5", max_workers: 3, require_approval: false,
+    allowed_targets: ["next", "triage", "human"], tools: EDIT_TOOLS, permission_mode: "dontAsk",
+    desc: "Writes the code change and its tests." },
+  { id: "build_test", name: "Build & test", model: "claude-haiku-5-5", max_workers: 1, require_approval: false,
+    allowed_targets: ["next", "implementation", "human"], tools: READ_TOOLS, permission_mode: "dontAsk",
+    desc: "Builds, lints and runs the tests; sends failures back to Implementation." },
+  { id: "review", name: "Code review", model: "claude-opus-5-5", max_workers: 2, require_approval: false,
+    allowed_targets: ["next", "implementation", "human"], tools: READ_TOOLS, permission_mode: "dontAsk",
+    desc: "Reviews the diff like a senior engineer before it is published." },
+  { id: "security_audit", name: "Security audit", model: "claude-opus-5-5", max_workers: 1, require_approval: false,
+    allowed_targets: ["next", "implementation", "human"], tools: READ_TOOLS, permission_mode: "dontAsk",
+    desc: "Looks for injection, secrets, unsafe input handling and risky dependencies." },
+  { id: "docs", name: "Documentation", model: "claude-sonnet-5-5", max_workers: 1, require_approval: false,
+    allowed_targets: ["next", "human"], tools: EDIT_TOOLS, permission_mode: "dontAsk",
+    desc: "Updates README, docs and code comments to match the change." },
+  { id: "changelog", name: "Changelog", model: "claude-haiku-5-5", max_workers: 1, require_approval: false,
+    allowed_targets: ["next", "human"], tools: EDIT_TOOLS, permission_mode: "dontAsk",
+    desc: "Adds a user-facing changelog entry for the change." },
+  { id: "pull_request", name: "Pull request", model: "claude-haiku-5-5", max_workers: 1, require_approval: true,
+    allowed_targets: ["next", "implementation", "human"], tools: READ_TOOLS, permission_mode: "dontAsk",
+    desc: "Pushes the branch and opens a pull request (after your approval)." },
+];
+
+// Small modal on top of the pipeline dialog listing STEP_PRESETS; calls onPick(preset).
+function presetPicker(onPick) {
+  const dlg = h("dialog", { class: "preset-picker" },
+    h("h2", {}, "Choose default stage"),
+    h("p", { class: "help" }, "Replaces the name, model, workers, approval, permissions, transitions and tools of this step. Transitions to steps that are not in the pipeline are left out."),
+    h("div", { class: "preset-list" }, STEP_PRESETS.map((p) =>
+      h("button", { onclick: () => { dlg.close(); onPick(p); } },
+        h("strong", {}, p.name),
+        h("small", {}, `${p.model} · ${p.max_workers} worker${p.max_workers === 1 ? "" : "s"}${p.require_approval ? " · approval" : ""} · ${p.tools.join(", ")}`),
+        h("span", {}, p.desc)))),
+    h("div", { class: "preset-actions" }, h("button", { onclick: () => dlg.close() }, "Cancel")),
+  );
+  dlg.addEventListener("close", () => dlg.remove());
+  document.body.append(dlg);
+  dlg.showModal();
+}
+
 function pipelineDialog() {
   const draft = structuredClone({
     max_iterations: S.pipeline.max_iterations,
@@ -908,6 +960,23 @@ function pipelineDialog() {
     if (on && i < 0) list.push(value);
     if (!on && i >= 0) list.splice(i, 1);
   };
+  // Overwrites a step with a preset. Existing steps keep their id (runs and messages
+  // use it); new steps take the preset's id so they pick up its default prompt.
+  const applyPreset = (step, p) => {
+    step.name = p.name;
+    step.model = p.model;
+    step.max_workers = p.max_workers;
+    step.require_approval = p.require_approval;
+    step.permission_mode = p.permission_mode;
+    step.tools = [...p.tools];
+    if (step._new) {
+      step._idEdited = false;
+      renameId(step, uniqueId(p.id, step));
+    }
+    step.allowed_targets = p.allowed_targets.filter((t) =>
+      t === "next" || t === "human" || (t !== step.id && draft.steps.some((s) => s.id === t)));
+    render();
+  };
 
   const card = (step, i) => {
     const last = i === draft.steps.length - 1;
@@ -931,6 +1000,7 @@ function pipelineDialog() {
         nameInput,
         idInput ?? h("code", { title: "Step id (fixed once created: runs and messages use it)" }, step.id),
         h("span", { class: "spacer" }),
+        h("button", { class: "small", title: "Fill in this step from a list of preset stages", onclick: () => presetPicker((p) => applyPreset(step, p)) }, "Choose default stage"),
         h("button", { class: "small", disabled: i === 0, title: "Move up", onclick: () => { draft.steps.splice(i - 1, 0, ...draft.steps.splice(i, 1)); render(); } }, "↑"),
         h("button", { class: "small", disabled: last, title: "Move down", onclick: () => { draft.steps.splice(i + 1, 0, ...draft.steps.splice(i, 1)); render(); } }, "↓"),
         h("button", { class: "small danger", title: "Remove step", onclick: () => {
