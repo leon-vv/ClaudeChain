@@ -277,7 +277,7 @@ function itemCell(it) {
   const tokens = it.runs.reduce((sum, r) => sum + tokTotal(r.tokens), 0);
   const last = it.runs[it.runs.length - 1];
   return h("td", { class: "item-cell" },
-    h("div", { class: "title", onclick: () => openInspector(it.id, last?.n) }, it.number ? `#${it.number} ` : "", it.title || it.id),
+    h("div", { class: "title", onclick: () => openInspector(it.id, last?.n, true) }, it.number ? `#${it.number} ` : "", it.title || it.id),
     h("div", { class: "sub" },
       h("span", {}, it.id),
       it.url && h("a", { href: it.url, target: "_blank", rel: "noopener" }, "issue ↗"),
@@ -344,8 +344,18 @@ function stepCell(it, s) {
 
 // ---- Inspector -----------------------------------------------------------
 
-async function openInspector(id, run) {
-  S.insp = { id, run: run ?? null, tab: S.insp?.tab || "transcript", data: null, file: null };
+/// True when run `n` is the item's newest run and still going (or there is no run yet).
+function isLiveLatest(item, n) {
+  const last = item?.runs[item.runs.length - 1];
+  return n == null || (last != null && last.n === n && !last.ended);
+}
+
+/// `follow`: move to each new run of the item as it starts. Defaults to true only when
+/// the chosen run is the live latest one; a pinned (ended or older) run stays put.
+async function openInspector(id, run, follow) {
+  run = run ?? null;
+  follow = follow ?? isLiveLatest(S.items.get(id), run);
+  S.insp = { id, run, follow, tab: S.insp?.tab || "transcript", data: null, file: null };
   $("#inspector").hidden = false;
   await loadRun();
 }
@@ -369,12 +379,12 @@ async function loadRun() {
   if (S.insp === insp) renderInspector();
 }
 
-/// Called when the open item changes; reloads when a new run started.
+/// Called when the open item changes. Switches to a new run only when the inspector is
+/// following (`insp.follow`); otherwise it stays on the run the user picked.
 function refreshInspectorFromItem(item) {
   const insp = S.insp;
   const last = item.runs[item.runs.length - 1];
-  const viewingLatest = insp.run == null || insp.run === last?.n - 1 || insp.run === last?.n;
-  if (last && insp.run !== last.n && viewingLatest && !last.ended) {
+  if (insp.follow && last && insp.run !== last.n) {
     insp.run = last.n; // follow the new run live
     loadRun();
     return;
@@ -915,6 +925,7 @@ $("#dialog-cancel").onclick = () => $("#dialog").close();
 $("#insp-close").onclick = closeInspector;
 $("#insp-run").onchange = (e) => {
   S.insp.run = e.target.value ? parseInt(e.target.value, 10) : null;
+  S.insp.follow = isLiveLatest(S.items.get(S.insp.id), S.insp.run);
   loadRun();
 };
 $("#insp-tabs").onclick = (e) => {
