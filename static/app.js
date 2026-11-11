@@ -161,16 +161,14 @@ async function load() {
   // The folder name keeps the header on one line; the tooltip has the full path.
   $("#repo-path").textContent = st.repo ? st.repo.replace(/\/+$/, "").split("/").pop() : "no repository";
   $("#repo").title = st.repo ? `Repository ${st.repo}\nData ${st.data}\n\nClick to open another repository` : "Open a repository";
-  for (const id of ["#btn-general", "#btn-add"]) $(id).disabled = !st.repo;
+  $("#btn-add").disabled = !st.repo;
   $("#no-repo").hidden = !!st.repo;
+  // Without a repository the page is a landing page: no top bar, just a big "Select repository" button.
+  document.body.classList.toggle("no-repo", !st.repo);
   if (!st.repo) {
     $("#board").replaceChildren();
     $("#empty").hidden = true;
     closeInspector();
-    if (!$("#dialog").open && !load.prompted) {
-      load.prompted = true;
-      workspaceDialog();
-    }
     return;
   }
   renderBoard();
@@ -274,17 +272,7 @@ function stepHeader(s, busy) {
           models.map((m) => h("option", { value: m, selected: m === s.model }, shortModel(m)))),
       ),
       h("div", { class: "row" },
-        h("button", { class: "small", title: `${s.name} prompt`, onclick: () => editPrompt(s.id, `${s.name} prompt`) }, "Edit"),
-      ),
-      h("div", { class: "row bottom" },
-        h("label", {}, "workers"),
-        h("input", {
-          type: "number", min: 0, max: 32, value: s.max_workers, title: "Maximum agents running this step at once (0 pauses the step)",
-          onchange: (e) => put({ max_workers: Math.max(0, parseInt(e.target.value, 10) || 0) }),
-        }),
-        h("label", { title: "Items wait for your approval before this step runs" },
-          h("input", { type: "checkbox", checked: s.require_approval, onchange: (e) => put({ require_approval: e.target.checked }) }),
-          " approval"),
+        h("button", { class: "small", title: `${s.name} prompt`, onclick: () => editPrompt(s.id, `${s.name} prompt`) }, "Edit prompt"),
       ),
     ),
   );
@@ -334,14 +322,15 @@ function itemCell(it) {
     it.pending_notes.length > 0 && h("div", { class: "detail" }, `📝 ${it.pending_notes.length} note(s) for the next run`),
   );
 }
-// Last column: a Remove button, shown once the item is done.
+// Last column: a small remove cross, shown once the item is done.
 function rowActions(it) {
   return h("td", { class: "row-actions" },
     it.status === "done" && h("button", {
-      class: "small danger",
+      class: "remove-x",
       title: "Remove this finished item from the board",
+      "aria-label": "Remove",
       onclick: () => removeItem(it.id),
-    }, "Remove"));
+    }, "✕"));
 }
 
 function runChipClass(run) {
@@ -944,6 +933,13 @@ function pipelineDialog() {
   function render() {
     const scroll = $("#dialog-body").scrollTop;
     body.replaceChildren(
+      h("div", { class: "pl-general" },
+        h("button", {
+          type: "button",
+          title: "Edit the general prompt shared by every step (closes this dialog; unsaved pipeline changes are lost)",
+          onclick: () => editPrompt("general", "General prompt"),
+        }, "General prompt…"),
+      ),
       h("div", { class: "pl-settings" },
         h("div", {}, h("label", {}, "Max backward moves per item"),
           h("input", { type: "number", min: 0, max: 100, value: draft.max_iterations, onchange: (e) => (draft.max_iterations = parseInt(e.target.value, 10) || 0) })),
@@ -1003,7 +999,6 @@ $("#plan").onclick = () => showPage("resources");
 window.addEventListener("hashchange", () => showPage(location.hash === "#resources" ? "resources" : "board"));
 
 $("#btn-add").onclick = addDialog;
-$("#btn-general").onclick = () => editPrompt("general", "General prompt");
 $("#repo").onclick = workspaceDialog;
 $("#btn-open-repo").onclick = workspaceDialog;
 $("#dialog-cancel").onclick = () => $("#dialog").close();

@@ -28,8 +28,7 @@
     <div class="actions">
       <button class="plan" id="plan" title="Plan usage reported by Claude Code" hidden></button>
       <button id="btn-theme"title="Toggle dark mode" aria-label="Toggle dark mode"></button>
-      <span class="conn" id="conn" title="Live connection to the server">●</span>
-      <button id="btn-general">General prompt</button>
+      <span class="conn" id="conn" title="Live connection to the server"><span class="dot">●</span> Server</span>
     </div>
   </header>
 
@@ -37,9 +36,10 @@
 
   <main class="board-wrap" id="board-page">
     <table class="board" id="board"></table>
-    <div class="empty" id="no-repo" hidden>
+    <div class="landing" id="no-repo" hidden>
+      <h1>ClaudeChain</h1>
       <p>No repository is open.</p>
-      <button class="primary" id="btn-open-repo">Open repository…</button>
+      <button class="primary" id="btn-open-repo">📁 Select repository</button>
     </div>
     <p class="empty" id="empty" hidden>No work items yet. Use <b>+ Add issue</b> to paste a GitHub issue URL, <code>#123</code>, or issue text.</p>
   </main>
