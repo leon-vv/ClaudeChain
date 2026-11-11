@@ -165,16 +165,44 @@ async function load() {
   $("#repo").title = st.repo ? `Repository ${st.repo}\nData ${st.data}\n\nClick to open another repository` : "Open a repository";
   $("#btn-add").disabled = !st.repo;
   $("#no-repo").hidden = !!st.repo;
-  // Without a repository the page is a landing page: no top bar, just a big "Select repository" button.
+  // Without a repository the page is a landing page: no top bar, just a card for opening one.
   document.body.classList.toggle("no-repo", !st.repo);
+  document.body.classList.remove("loading");
   if (!st.repo) {
     $("#board").replaceChildren();
     $("#empty").hidden = true;
     closeInspector();
+    renderLanding();
     return;
   }
   renderBoard();
   if (S.insp) renderInspector();
+}
+
+/// Landing page: one-click buttons for recently opened repositories.
+function renderLanding() {
+  $("#landing-recent").hidden = !S.recent.length;
+  $("#landing-recent-list").replaceChildren(...S.recent.map((r) => {
+    const data = r.data === `${r.repo.replace(/\/+$/, "")}/.claudechain` ? null : r.data;
+    return h("li", {},
+      h("button", {
+        title: `Open ${r.repo}\nData ${r.data}`,
+        onclick: async (e) => {
+          const btn = e.currentTarget;
+          btn.disabled = true;
+          try {
+            await api("POST", "/api/workspace", { repo: r.repo, data });
+            await load();
+          } catch (err) {
+            toast(err.message);
+          } finally {
+            btn.disabled = false;
+          }
+        },
+      },
+        h("span", { class: "name" }, `📁 ${r.repo.replace(/\/+$/, "").split("/").pop() || r.repo}`),
+        h("small", {}, data ? `${r.repo} · data: ${data}` : r.repo)));
+  }));
 }
 
 function connect() {
@@ -1121,6 +1149,12 @@ setInterval(() => {
   }
 }, 5000);
 
+// Load the state right away instead of waiting for the live connection, so the
+// landing page or board shows up even when the event stream is slow to open.
+load().catch((e) => {
+  document.body.classList.remove("loading");
+  toast(`Could not load state: ${e.message}`);
+});
 connect();
 // resources.js loads after this script; switch pages once it has.
 window.addEventListener("DOMContentLoaded", () => location.hash === "#resources" && showPage("resources"));
