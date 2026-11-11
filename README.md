@@ -101,3 +101,5 @@ The server only listens on localhost by default. Because it can run agents and
 browse folders, it rejects requests whose Host header isn't a local name, and
 changes need an `x-claudechain` header, so other websites can't drive it from
 your browser.
+
+<!-- ClaudeChain test item issue-1: dummy edit, no functional change. -->
