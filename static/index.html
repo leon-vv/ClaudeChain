@@ -4,6 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ClaudeChain</title>
+  <script>
+    // Set the theme before the stylesheet applies, so the page never flashes the wrong one.
+    (() => {
+      let t = null;
+      try { t = localStorage.getItem("claudechain-theme"); } catch {}
+      document.documentElement.dataset.theme = t || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    })();
+  </script>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -18,6 +26,7 @@
     </div>
     <div class="actions">
       <button class="plan" id="plan" title="Plan usage reported by Claude Code" hidden></button>
+      <button id="btn-theme" class="icon" title="Toggle dark mode" aria-label="Toggle dark mode"></button>
       <span class="conn" id="conn" title="Live connection to the server">●</span>
       <button id="btn-general">General prompt</button>
       <button id="btn-pipeline">Pipeline</button>
@@ -38,6 +47,7 @@
 
   <aside class="inspector" id="inspector" hidden>
     <div class="insp-head">
+      <button id="insp-close" class="close" title="Close (Esc)" aria-label="Close">✕ Close</button>
       <div class="insp-title">
         <div id="insp-item"></div>
         <div class="insp-meta" id="insp-meta"></div>
@@ -48,7 +58,6 @@
         <button id="insp-retry">Retry step</button>
         <button id="insp-move">Move…</button>
         <button id="insp-remove" class="danger">Remove</button>
-        <button id="insp-close" class="icon" title="Close">✕</button>
       </div>
     </div>
     <nav class="tabs" id="insp-tabs">
