@@ -161,7 +161,7 @@ async function load() {
   // The folder name keeps the header on one line; the tooltip has the full path.
   $("#repo-path").textContent = st.repo ? st.repo.replace(/\/+$/, "").split("/").pop() : "no repository";
   $("#repo").title = st.repo ? `Repository ${st.repo}\nData ${st.data}\n\nClick to open another repository` : "Open a repository";
-  for (const id of ["#btn-general", "#btn-pipeline", "#btn-add"]) $(id).disabled = !st.repo;
+  for (const id of ["#btn-general", "#btn-add"]) $(id).disabled = !st.repo;
   $("#no-repo").hidden = !!st.repo;
   if (!st.repo) {
     $("#board").replaceChildren();
@@ -251,10 +251,12 @@ function renderBoard() {
       h("div", {}, `max ${p.max_iterations} bounces per item`),
       h("button", { class: "small", style: "margin-top:6px", onclick: pipelineDialog }, "Edit pipeline details…")),
     p.steps.map((s) => stepHeader(s, busy[s.id] || 0)),
+    h("th", { class: "row-actions" }),
   );
   const rows = items.map((it) => h("tr", {},
     itemCell(it),
     p.steps.map((s) => stepCell(it, s)),
+    rowActions(it),
   ));
   board.replaceChildren(h("thead", {}, head), h("tbody", {}, rows));
 }
@@ -331,6 +333,15 @@ function itemCell(it) {
     it.status === "done" && h("div", { class: `state done` }, STATUS_LABEL.done),
     it.pending_notes.length > 0 && h("div", { class: "detail" }, `📝 ${it.pending_notes.length} note(s) for the next run`),
   );
+}
+// Last column: a Remove button, shown once the item is done.
+function rowActions(it) {
+  return h("td", { class: "row-actions" },
+    it.status === "done" && h("button", {
+      class: "small danger",
+      title: "Remove this finished item from the board",
+      onclick: () => removeItem(it.id),
+    }, "Remove"));
 }
 
 function runChipClass(run) {
@@ -908,9 +919,11 @@ function pipelineDialog() {
         ),
         h("span", { class: "lbl" }, "Transitions"),
         h("div", { class: "checks" },
-          check(last ? "next (= done)" : `next (→ ${draft.steps[i + 1].name})`, step.allowed_targets.includes("next"), (v) => toggle(step.allowed_targets, "next", v)),
-          check("human", step.allowed_targets.includes("human"), (v) => toggle(step.allowed_targets, "human", v)),
-          draft.steps.filter((s) => s !== step).map((s) =>
+          check(last ? "Done" : `→ ${draft.steps[i + 1].name}`, step.allowed_targets.includes("next"), (v) => toggle(step.allowed_targets, "next", v),
+            last ? "Allow finishing the item" : `Allow passing the item on to ${draft.steps[i + 1].name}`),
+          check("Human", step.allowed_targets.includes("human"), (v) => toggle(step.allowed_targets, "human", v), "Allow stopping and asking the human for help"),
+          // The following step is already covered by the box above; list it separately only if it is explicitly allowed by id.
+          draft.steps.filter((s, j) => s !== step && (j !== i + 1 || step.allowed_targets.includes(s.id))).map((s) =>
             check(`${s.name}`, step.allowed_targets.includes(s.id), (v) => toggle(step.allowed_targets, s.id, v), `Allow sending the item to ${s.name} (${s.id})`)),
         ),
         h("span", { class: "lbl" }, "Tools"),
@@ -937,7 +950,7 @@ function pipelineDialog() {
         h("div", {}, h("label", {}, "Models offered in dropdowns (comma-separated)"),
           h("input", { type: "text", value: draft.models.join(", "), onchange: (e) => { draft.models = e.target.value.split(",").map((x) => x.trim()).filter(Boolean); render(); } })),
       ),
-      h("p", { class: "help" }, "Steps run left to right. “next” moves an item to the following step (or finishes it after the last step); the other boxes are the steps an agent may send work to, e.g. back to Implementation when a build fails. New steps get a starter prompt you can edit from the column header. A step can only be removed when no unfinished item is in it."),
+      h("p", { class: "help" }, "Steps run left to right. Under Transitions, “→ step” passes an item on to the following step (“Done” on the last step finishes it), “Human” stops and asks you, and the other boxes are the steps an agent may send work to, e.g. back to Implementation when a build fails. New steps get a starter prompt you can edit from the column header. A step can only be removed when no unfinished item is in it."),
       ...draft.steps.map(card),
       h("button", { onclick: () => {
         const prev = draft.steps[draft.steps.length - 1];
@@ -991,7 +1004,6 @@ window.addEventListener("hashchange", () => showPage(location.hash === "#resourc
 
 $("#btn-add").onclick = addDialog;
 $("#btn-general").onclick = () => editPrompt("general", "General prompt");
-$("#btn-pipeline").onclick = pipelineDialog;
 $("#repo").onclick = workspaceDialog;
 $("#btn-open-repo").onclick = workspaceDialog;
 $("#dialog-cancel").onclick = () => $("#dialog").close();
@@ -1054,7 +1066,7 @@ function savedTheme() {
 function applyTheme(t) {
   document.documentElement.dataset.theme = t;
   const btn = $("#btn-theme");
-  btn.textContent = t === "dark" ? "☀" : "☾";
+  btn.textContent = t === "dark" ? "☀ Light mode" : "☾ Dark mode";
   btn.title = t === "dark" ? "Switch to light mode" : "Switch to dark mode";
   btn.setAttribute("aria-label", btn.title);
 }
@@ -1081,12 +1093,12 @@ $("#insp-tabs").onclick = (e) => {
 $("#insp-stop").onclick = () => act(() => api("POST", `/api/items/${S.insp.id}/stop`));
 $("#insp-retry").onclick = () => act(() => api("POST", `/api/items/${S.insp.id}/retry`));
 $("#insp-move").onclick = () => moveDialog(S.items.get(S.insp.id));
-$("#insp-remove").onclick = () => {
-  const id = S.insp.id;
+function removeItem(id) {
   if (confirm(`Remove ${id} from the board? Its folder is moved to archive/ and its worktree is removed (the branch is kept).`)) {
     act(() => api("DELETE", `/api/items/${id}`));
   }
-};
+}
+$("#insp-remove").onclick = () => removeItem(S.insp.id);
 $("#composer").onsubmit = (e) => e.preventDefault();
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && S.insp && !$("#dialog").open) closeInspector();
