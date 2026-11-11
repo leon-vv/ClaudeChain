@@ -13,6 +13,7 @@ const S = {
   insp: null, // { id, run, tab, data, file }
   account: null, // { limits, pause_above, paused }
   page: "board",
+  renaming: null, // step id whose header name is being edited
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -235,6 +236,9 @@ function scheduleBoard() {
 function renderBoard() {
   const p = S.pipeline;
   if (!p) return;
+  // A header rename is in progress; re-rendering would destroy its input.
+  // renameStep() calls renderBoard() again when it finishes.
+  if (S.renaming) return;
   const board = $("#board");
   const items = [...S.items.values()].sort((a, b) => a.created.localeCompare(b.created));
   $("#empty").hidden = items.length > 0;
@@ -259,26 +263,56 @@ function stepHeader(s, busy) {
   const models = [...new Set([...S.pipeline.models, s.model])];
   const put = (body) => act(() => api("PUT", `/api/steps/${s.id}`, body));
   return h("th", { class: "step-head" },
-    h("div", { class: "name" }, s.name, h("span", { class: "busy" }, `${busy}/${s.max_workers} busy`)),
-    h("div", { class: "row" },
-      h("select", { title: "Model", onchange: (e) => put({ model: e.target.value }) },
-        models.map((m) => h("option", { value: m, selected: m === s.model }, shortModel(m)))),
-    ),
-    h("div", { class: "row" },
-      h("label", {}, "workers"),
-      h("input", {
-        type: "number", min: 0, max: 32, value: s.max_workers, title: "Maximum agents running this step at once (0 pauses the step)",
-        onchange: (e) => put({ max_workers: Math.max(0, parseInt(e.target.value, 10) || 0) }),
-      }),
-      h("label", { title: "Items wait for your approval before this step runs" },
-        h("input", { type: "checkbox", checked: s.require_approval, onchange: (e) => put({ require_approval: e.target.checked }) }),
-        " approval"),
-    ),
-    h("div", { class: "row" },
-      h("button", { class: "small", onclick: () => editPrompt(s.id, `${s.name} prompt`) }, "✎ prompt"),
-      h("span", { title: "Allowed transitions" }, "→ " + s.allowed_targets.map((t) => (t === "next" || t === "human" ? t : stepName(t))).join(", ")),
+    h("div", { class: "step-head-inner" },
+      h("div", { class: "name" },
+        h("span", { class: "label", title: "Double-click to rename", ondblclick: (e) => renameStep(s, e.currentTarget) }, s.name),
+        h("span", { class: "busy" }, `${busy}/${s.max_workers} busy`)),
+      h("div", { class: "row" },
+        h("select", { title: "Model", onchange: (e) => put({ model: e.target.value }) },
+          models.map((m) => h("option", { value: m, selected: m === s.model }, shortModel(m)))),
+      ),
+      h("div", { class: "row" },
+        h("button", { class: "small", title: `${s.name} prompt`, onclick: () => editPrompt(s.id, `${s.name} prompt`) }, "Edit"),
+      ),
+      h("div", { class: "row bottom" },
+        h("label", {}, "workers"),
+        h("input", {
+          type: "number", min: 0, max: 32, value: s.max_workers, title: "Maximum agents running this step at once (0 pauses the step)",
+          onchange: (e) => put({ max_workers: Math.max(0, parseInt(e.target.value, 10) || 0) }),
+        }),
+        h("label", { title: "Items wait for your approval before this step runs" },
+          h("input", { type: "checkbox", checked: s.require_approval, onchange: (e) => put({ require_approval: e.target.checked }) }),
+          " approval"),
+      ),
     ),
   );
+}
+
+// Swaps a step header's name for a text input. Enter or blur saves, Escape cancels.
+function renameStep(s, label) {
+  if (S.renaming) return;
+  S.renaming = s.id;
+  let finished = false;
+  const input = h("input", { type: "text", class: "rename", value: s.name, maxlength: 80 });
+  const finish = async (save) => {
+    if (finished) return;
+    finished = true;
+    const name = input.value.trim();
+    S.renaming = null;
+    if (save && name && name !== s.name) {
+      // On success the server emits a "pipeline" event, which reloads and re-renders.
+      await act(() => api("PUT", `/api/steps/${s.id}`, { name }));
+    }
+    renderBoard();
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finish(false); }
+  });
+  input.addEventListener("blur", () => finish(true));
+  label.replaceWith(input);
+  input.focus();
+  input.select();
 }
 
 function itemCell(it) {
