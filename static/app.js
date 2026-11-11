@@ -648,7 +648,12 @@ async function renderFiles(body) {
     list.append(li);
     if (f === insp.file) show(f, li);
   }
-  body.replaceChildren(h("div", { class: "files" }, list, view));
+  const note = h("p", { class: "files-note" },
+    "Everything in this work item's folder ", h("code", {}, `.claudechain/items/${insp.id}/`), ". ",
+    h("b", {}, "messages/"), " holds the hand-off notes each agent writes; the next agent gets the list of these and is told to read them. ",
+    h("b", {}, "runs/"), " holds per-run logs (input, event stream, stderr, transition). ",
+    "This is not a list of files the agent read, and not the code changes. For those, see the Diff tab.");
+  body.replaceChildren(note, h("div", { class: "files" }, list, view));
 }
 
 async function renderDiff(body) {
@@ -938,6 +943,54 @@ $("#repo").onclick = workspaceDialog;
 $("#btn-open-repo").onclick = workspaceDialog;
 $("#dialog-cancel").onclick = () => $("#dialog").close();
 $("#insp-close").onclick = closeInspector;
+
+// Inspector width: drag the left edge to resize; the width is kept in localStorage.
+const INSP_WIDTH_KEY = "claudechain-inspector-width";
+const INSP_MIN_WIDTH = 360;
+function clampInspWidth(w) {
+  return Math.round(Math.max(Math.min(INSP_MIN_WIDTH, window.innerWidth), Math.min(w, window.innerWidth)));
+}
+function applyInspWidth(w) {
+  $("#inspector").style.width = w == null ? "" : clampInspWidth(w) + "px";
+}
+function savedInspWidth() {
+  let v = null;
+  try { v = parseInt(localStorage.getItem(INSP_WIDTH_KEY), 10); } catch {}
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+applyInspWidth(savedInspWidth());
+{
+  const handle = $("#insp-resizer");
+  handle.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    handle.classList.add("dragging");
+    document.body.classList.add("resizing");
+  });
+  handle.addEventListener("pointermove", (e) => {
+    if (!handle.hasPointerCapture(e.pointerId)) return;
+    applyInspWidth(window.innerWidth - e.clientX);
+  });
+  const end = (e) => {
+    if (!handle.hasPointerCapture(e.pointerId)) return;
+    handle.releasePointerCapture(e.pointerId);
+    handle.classList.remove("dragging");
+    document.body.classList.remove("resizing");
+    const w = parseInt($("#inspector").style.width, 10);
+    if (Number.isFinite(w)) try { localStorage.setItem(INSP_WIDTH_KEY, String(w)); } catch {}
+  };
+  handle.addEventListener("pointerup", end);
+  handle.addEventListener("pointercancel", end);
+  handle.addEventListener("dblclick", () => {
+    try { localStorage.removeItem(INSP_WIDTH_KEY); } catch {}
+    applyInspWidth(null); // back to the CSS default min(920px, 100vw)
+  });
+}
+window.addEventListener("resize", () => {
+  const w = savedInspWidth();
+  if (w != null) applyInspWidth(w); // re-clamp to the new window size
+});
 
 // Theme: follows the system until the user picks one with the toggle; the choice is kept in localStorage.
 const THEME_KEY = "claudechain-theme";

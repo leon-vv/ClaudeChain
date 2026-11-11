@@ -46,6 +46,7 @@
   </main>
 
   <aside class="inspector" id="inspector" hidden>
+    <div class="insp-resizer" id="insp-resizer" title="Drag to resize · double-click to reset" aria-hidden="true"></div>
     <div class="insp-head">
       <button id="insp-close" class="close" title="Close (Esc)" aria-label="Close">✕ Close</button>
       <div class="insp-title">
@@ -64,7 +65,7 @@
       <button data-tab="transcript">Transcript</button>
       <button data-tab="input">Input</button>
       <button data-tab="output">Output</button>
-      <button data-tab="files">Files</button>
+      <button data-tab="files" title="All files in this work item's folder (.claudechain/items/&lt;id&gt;/): the issue, the messages agents pass to each other, and per-run logs. Not the code; see Diff.">Files</button>
       <button data-tab="diff">Diff</button>
     </nav>
     <section class="insp-body" id="insp-body"></section>

@@ -162,6 +162,12 @@ td.current { box-shadow: inset 3px 0 0 var(--accent); }
   display: flex; flex-direction: column; z-index: 10; box-shadow: -8px 0 24px rgba(0,0,0,.12);
 }
 .inspector[hidden] { display: none; }
+.insp-resizer {
+  position: absolute; left: -3px; top: 0; bottom: 0; width: 8px; z-index: 1;
+  cursor: ew-resize; touch-action: none;
+}
+.insp-resizer:hover, .insp-resizer.dragging { background: var(--accent); opacity: .35; }
+body.resizing { cursor: ew-resize; user-select: none; }
 .insp-head { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
 .insp-head .close { flex: none; font-weight: 600; }
 .insp-title { min-width: 0; flex: 1; }
@@ -203,6 +209,8 @@ h3 { font-size: 13px; margin: 14px 0 4px; color: var(--muted); text-transform: u
 .files ul { list-style: none; margin: 0; padding: 0; font-family: var(--mono); font-size: 12px; }
 .files li { padding: 3px 6px; border-radius: 4px; cursor: pointer; word-break: break-all; }
 .files li:hover, .files li.active { background: var(--panel-2); color: var(--accent); }
+.files-note { color: var(--muted); font-size: 12.5px; margin: 0 0 10px; }
+.files-note code { font-family: var(--mono); font-size: 12px; }
 .diff .add { color: var(--ok); }
 .diff .del { color: var(--bad); }
 .diff .hunk { color: var(--wait); }
@@ -223,6 +231,8 @@ dialog .help { color: var(--muted); font-size: 12.5px; margin: 4px 0 8px; }
 @media (max-width: 700px) {
   .board-wrap { padding: 8px; }
   .files { grid-template-columns: 1fr; }
+  .inspector { width: 100vw !important; }
+  .insp-resizer { display: none; }
 }
 
 dialog.wide { width: min(1100px, 96vw); }
