@@ -219,27 +219,87 @@ async fn put_settings(Cur(app): Cur, Json(s): Json<Settings>) -> ApiResult<Json<
 }
 
 #[derive(Deserialize)]
+#[derive(Default)]
 struct StepUpdate {
+    name: Option<String>,
     model: Option<String>,
     max_workers: Option<usize>,
     require_approval: Option<bool>,
 }
 
+/// Applies the fields present in `u` to `s`. Fails on an empty name.
+fn apply_step_update(s: &mut config::Step, u: StepUpdate) -> anyhow::Result<()> {
+    if let Some(n) = u.name {
+        let n = n.trim();
+        if n.is_empty() {
+            anyhow::bail!("step name cannot be empty");
+        }
+        s.name = n.to_string();
+    }
+    if let Some(m) = u.model {
+        s.model = m;
+    }
+    if let Some(w) = u.max_workers {
+        s.max_workers = w;
+    }
+    if let Some(a) = u.require_approval {
+        s.require_approval = a;
+    }
+    Ok(())
+}
+
 async fn put_step(Cur(app): Cur, Path(step): Path<String>, Json(u): Json<StepUpdate>) -> ApiResult<Json<Value>> {
     app.update_pipeline(|p| {
         let s = p.step_mut(&step).ok_or_else(|| anyhow::anyhow!("unknown step '{step}'"))?;
-        if let Some(m) = u.model {
-            s.model = m;
-        }
-        if let Some(w) = u.max_workers {
-            s.max_workers = w;
-        }
-        if let Some(a) = u.require_approval {
-            s.require_approval = a;
-        }
-        Ok(())
+        apply_step_update(s, u)
     })?;
     Ok(Json(json!({})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn step() -> config::Step {
+        config::Step {
+            id: "review".into(),
+            name: "Review".into(),
+            model: "claude-opus-5-5".into(),
+            max_workers: 1,
+            require_approval: false,
+            allowed_targets: vec!["next".into()],
+            tools: vec!["Write".into()],
+            permission_mode: "dontAsk".into(),
+        }
+    }
+
+    fn update(name: Option<&str>) -> StepUpdate {
+        StepUpdate { name: name.map(Into::into), ..Default::default() }
+    }
+
+    #[test]
+    fn rename_trims_and_keeps_id() {
+        let mut s = step();
+        apply_step_update(&mut s, update(Some("  Code review "))).unwrap();
+        assert_eq!(s.name, "Code review");
+        assert_eq!(s.id, "review");
+        assert_eq!(s.model, "claude-opus-5-5");
+    }
+
+    #[test]
+    fn rename_rejects_empty() {
+        let mut s = step();
+        assert!(apply_step_update(&mut s, update(Some("   "))).is_err());
+        assert_eq!(s.name, "Review");
+    }
+
+    #[test]
+    fn update_without_name_leaves_name() {
+        let mut s = step();
+        apply_step_update(&mut s, StepUpdate { max_workers: Some(3), ..Default::default() }).unwrap();
+        assert_eq!(s.name, "Review");
+        assert_eq!(s.max_workers, 3);
+    }
 }
 
 fn check_prompt_id(app: &App, id: &str) -> ApiResult<()> {
