@@ -303,7 +303,7 @@ table.data th { text-align: left; color: var(--muted); font-weight: normal; bord
 table.data td { border-bottom: 1px solid var(--border); padding: 4px 6px; }
 table.data .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .cell-meter { display: inline-flex; gap: 6px; align-items: center; justify-content: flex-end; }
-.bars { display: flex; gap: 3px; align-items: flex-end; height: 110px; padding-bottom: 16px; }
+.bars { display: flex; gap: 1px; align-items: flex-end; height: 110px; padding-bottom: 16px; }
 .bar { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; position: relative; }
 .bar span { display: block; background: var(--accent); border-radius: 2px 2px 0 0; min-height: 1px; opacity: .85; }
 .bar:hover span { opacity: 1; }
