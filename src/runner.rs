@@ -52,14 +52,37 @@ pub fn local_event(subtype: &str, text: &str) -> Value {
 }
 
 /// Environment variables that would make the CLI bill an API key or talk to
-/// a different endpoint instead of using the subscription login.
+/// a different endpoint instead of using the subscription login, and the ones
+/// `cargo run` sets for ClaudeChain itself. rustup's RUSTUP_TOOLCHAIN would
+/// otherwise override the worktree's rust-toolchain.toml in every build the
+/// agent runs, so its builds use a different compiler and share no cache.
 fn scrub_env(cmd: &mut Command) {
     for (key, _) in std::env::vars_os() {
         let k = key.to_string_lossy();
-        if k.starts_with("ANTHROPIC_") || k == "CLAUDECODE" || k.starts_with("CLAUDE_CODE_") {
+        if k.starts_with("ANTHROPIC_")
+            || k == "CLAUDECODE"
+            || k.starts_with("CLAUDE_CODE_")
+            || from_cargo_run(&k)
+        {
             cmd.env_remove(&key);
         }
     }
+}
+
+/// Set by rustup's proxy or by `cargo run` for the program being run; never
+/// configuration the user chose (CARGO_HOME, CARGO_TARGET_DIR stay).
+fn from_cargo_run(k: &str) -> bool {
+    matches!(
+        k,
+        "RUSTUP_TOOLCHAIN"
+            | "RUSTUP_TOOLCHAIN_SOURCE"
+            | "CARGO"
+            | "CARGO_MANIFEST_DIR"
+            | "CARGO_MANIFEST_PATH"
+            | "CARGO_CRATE_NAME"
+            | "CARGO_BIN_NAME"
+            | "CARGO_PRIMARY_PACKAGE"
+    ) || k.starts_with("CARGO_PKG_")
 }
 
 /// Runs the agent to completion. `on_event` sees every event (CLI events and
