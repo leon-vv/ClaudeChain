@@ -70,6 +70,9 @@ pub fn account_json(account: &Account) -> Value {
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageMode {
+    /// Pick the best delivery: live while the agent runs, otherwise continue
+    /// the run's session, otherwise keep it for the next run.
+    Auto,
     /// Deliver into the running agent's session.
     Live,
     /// Resume a finished run's session with this message.
@@ -432,21 +435,53 @@ impl App {
         Ok(())
     }
 
-    pub fn send_message(&self, id: &str, run: Option<u32>, mode: MessageMode, text: String) -> Result<()> {
+    /// Delivers a message from the human. Returns how it was delivered
+    /// (`live`, `continue` or `note`).
+    pub fn send_message(&self, id: &str, run: Option<u32>, mode: MessageMode, text: String) -> Result<&'static str> {
         if text.trim().is_empty() {
             bail!("empty message");
         }
         match mode {
+            MessageMode::Auto => {
+                // Live while the agent process is running.
+                let text = {
+                    let running = self.running.lock().unwrap();
+                    match running.get(id) {
+                        Some(control) => match control.messages.send(text) {
+                            Ok(()) => return Ok("live"),
+                            Err(e) => e.0,
+                        },
+                        None => text,
+                    }
+                };
+                // Otherwise resume the run's session if it has one.
+                let resumable = {
+                    let items = self.items.lock().unwrap();
+                    items.get(id).is_some_and(|item| {
+                        item.status != Status::Running
+                            && run
+                                .or(item.runs.last().map(|r| r.n))
+                                .and_then(|n| item.run(n))
+                                .is_some_and(|r| r.session_id.is_some())
+                    })
+                };
+                if resumable {
+                    self.send_message(id, run, MessageMode::Continue, text)
+                } else {
+                    self.send_message(id, run, MessageMode::Note, text)
+                }
+            }
             MessageMode::Live => {
                 let running = self.running.lock().unwrap();
                 let control = running.get(id).ok_or_else(|| anyhow!("{id} is not running"))?;
                 control.messages.send(text).map_err(|_| anyhow!("the agent has finished"))?;
-                Ok(())
+                Ok("live")
             }
             MessageMode::Note => self.update_item(id, |item| {
                 item.pending_notes.push(Note { at: Utc::now(), text });
                 Ok(())
-            }),
+            })
+            .map(|()| "note"),
             MessageMode::Continue => self.update_item(id, |item| {
                 if item.status == Status::Running {
                     bail!("{id} is running; send the message live instead");
@@ -459,9 +494,15 @@ impl App {
                 let step = r.step.clone();
                 item.enter_step(&step);
                 item.approved = true;
-                item.pending_resume = Some(PendingResume { from_run: n, message: text });
+                // Several messages sent before the resume starts are combined.
+                let message = match item.pending_resume.take() {
+                    Some(p) if p.from_run == n => format!("{}\n\n{text}", p.message),
+                    _ => text,
+                };
+                item.pending_resume = Some(PendingResume { from_run: n, message });
                 Ok(())
-            }),
+            })
+            .map(|()| "continue"),
         }
     }
 
@@ -769,6 +810,9 @@ fn finish_run(layout: &Layout, pipeline: &Pipeline, item: &mut Item, n: u32, res
     let decision: Result<Option<String>, String> = match result {
         Err(e) => Err(format!("Agent could not run: {e:#}")),
         Ok(res) => {
+            for text in &res.undelivered {
+                item.pending_notes.push(Note { at: Utc::now(), text: text.clone() });
+            }
             cost = res.cost_usd;
             session = res.session_id.clone();
             if res.stopped {

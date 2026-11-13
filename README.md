@@ -40,9 +40,9 @@ Options: `--repo <path>`, `--data <dir>`, `--port`, `--host`, `--claude <path>`.
   each step's model, thinking level and prompt. Setting
   workers to 0 pauses a step.
 - **Click a cell** to inspect a run: live transcript, exact input, output files
-  and the branch diff. From there you can message a running agent, continue a
-  finished run, leave a note for the next run, or stop, retry, move or remove
-  the item.
+  and the branch diff. From there you can chat with the agent: messages reach a
+  running agent right away, and resume a finished run's session. You can also
+  stop, retry, move or remove the item.
 - **Row buttons** (far right of each item): ⏪ restarts the item from scratch
   (deletes its runs, messages, worktree and local branch, then queues it at the
   first step) and ✕ removes it from the board. Both stop a running agent first.

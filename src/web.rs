@@ -399,8 +399,8 @@ struct Message {
 }
 
 async fn message(Cur(app): Cur, Path(id): Path<String>, Json(m): Json<Message>) -> ApiResult<Json<Value>> {
-    app.send_message(&id, m.run, m.mode, m.text)?;
-    Ok(Json(json!({})))
+    let delivered = app.send_message(&id, m.run, m.mode, m.text)?;
+    Ok(Json(json!({ "delivered": delivered })))
 }
 
 fn read_opt(path: &FsPath) -> Option<String> {

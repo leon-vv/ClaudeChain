@@ -38,6 +38,8 @@ pub struct RunResult {
     pub is_error: bool,
     pub stopped: bool,
     pub exit: Option<String>,
+    /// Human messages that arrived after the agent finished its turn.
+    pub undelivered: Vec<String>,
 }
 
 pub fn user_message(text: &str) -> String {
@@ -138,8 +140,9 @@ pub async fn run(
                     Some(text) => {
                         let Some(w) = stdin.as_mut() else {
                             let ev = local_event("human_message_dropped", &format!(
-                                "Not delivered, the agent already finished its turn (use Continue instead): {text}"));
+                                "The agent already finished its turn; this message is kept for the next run: {text}"));
                             log(&mut events, &ev.to_string(), &ev).await;
+                            result.undelivered.push(text);
                             continue;
                         };
                         let line = user_message(&format!("Message from the human supervising this pipeline:\n\n{text}"));
