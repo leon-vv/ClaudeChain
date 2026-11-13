@@ -66,6 +66,16 @@ pub async fn remove_worktree(repo: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Deletes a local branch if it exists (the remote branch is left alone).
+pub async fn delete_branch(repo: &Path, branch: &str) -> Result<()> {
+    let branch_ref = format!("refs/heads/{branch}");
+    let exists = git(repo).args(["rev-parse", "--verify", "--quiet", &branch_ref]).output().await?;
+    if exists.status.success() {
+        output(git(repo).args(["branch", "-D", branch])).await?;
+    }
+    Ok(())
+}
+
 /// Committed and uncommitted changes in the worktree since `base`, plus untracked files.
 pub async fn diff(worktree: &Path, base: Option<&str>) -> Result<String> {
     if !worktree.exists() {

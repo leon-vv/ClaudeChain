@@ -72,6 +72,7 @@ pub fn router(ws: Ws, allowed_hosts: Vec<String>) -> Router {
         .route("/api/items/{id}/approve", post(approve))
         .route("/api/items/{id}/move", post(move_item))
         .route("/api/items/{id}/retry", post(retry))
+        .route("/api/items/{id}/restart", post(restart))
         .route("/api/items/{id}/stop", post(stop))
         .route("/api/items/{id}/message", post(message))
         .route("/api/items/{id}/runs/{n}", get(get_run))
@@ -377,6 +378,11 @@ async fn move_item(Cur(app): Cur, Path(id): Path<String>, Json(m): Json<Move>) -
 
 async fn retry(Cur(app): Cur, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     app.retry(&id)?;
+    Ok(Json(json!({})))
+}
+
+async fn restart(Cur(app): Cur, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    app.restart_item(&id).await?;
     Ok(Json(json!({})))
 }
 

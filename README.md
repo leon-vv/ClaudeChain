@@ -43,6 +43,9 @@ Options: `--repo <path>`, `--data <dir>`, `--port`, `--host`, `--claude <path>`.
   and the branch diff. From there you can message a running agent, continue a
   finished run, leave a note for the next run, or stop, retry, move or remove
   the item.
+- **Row buttons** (far right of each item): ⏪ restarts the item from scratch
+  (deletes its runs, messages, worktree and local branch, then queues it at the
+  first step) and ✕ removes it from the board. Both stop a running agent first.
 - **Resources**: plan usage and limits, an auto-pause threshold, token usage,
   and system load (Linux only).
 
