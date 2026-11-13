@@ -18,6 +18,10 @@ const MAX_RECENT: usize = 10;
 pub struct Recent {
     pub repo: PathBuf,
     pub data: PathBuf,
+    /// Main branch chosen for the repository; empty for entries saved
+    /// before it could be chosen.
+    #[serde(default)]
+    pub main: String,
 }
 
 /// The `rate_limit_info` of the CLI's latest `rate_limit_event`.

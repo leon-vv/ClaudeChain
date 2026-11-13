@@ -125,6 +125,7 @@ async fn state(State(ws): State<Ws>) -> Json<Value> {
     Json(json!({
         "repo": app.layout.repo,
         "data": app.layout.data,
+        "main": app.layout.main,
         "default_data": workspace::default_data_dir(&app.layout.repo),
         "recent": recent,
         "home": workspace::home_dir(),
@@ -149,11 +150,12 @@ async fn events(State(ws): State<Ws>) -> Sse<impl Stream<Item = Result<Event, In
 struct OpenWorkspace {
     repo: String,
     data: Option<String>,
+    main: Option<String>,
 }
 
 async fn open_workspace(State(ws): State<Ws>, Json(o): Json<OpenWorkspace>) -> ApiResult<Json<Value>> {
     let data = o.data.as_deref().map(str::trim).filter(|d| !d.is_empty()).map(FsPath::new);
-    ws.open(FsPath::new(o.repo.trim()), data).await?;
+    ws.open(FsPath::new(o.repo.trim()), data, o.main.as_deref()).await?;
     Ok(Json(json!({})))
 }
 

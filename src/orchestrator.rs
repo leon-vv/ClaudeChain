@@ -350,7 +350,7 @@ impl App {
 
     /// Restarts an item from scratch: stops its agent, deletes its runs and
     /// messages (only `issue.md` is kept), removes its worktree and local
-    /// branch (both are re-created from the repo's HEAD on the next run; a
+    /// branch (both are re-created from the main branch on the next run; a
     /// pushed branch or PR on GitHub is left alone) and queues it at the
     /// first step.
     pub async fn restart_item(&self, id: &str) -> Result<()> {
@@ -653,7 +653,7 @@ impl App {
         let step = pipeline.step(&run.step).cloned().ok_or_else(|| anyhow!("unknown step {}", run.step))?;
 
         let worktree = self.layout.worktree(id);
-        let head = git::ensure_worktree(&self.layout.repo, &worktree, &item.branch)
+        let head = git::ensure_worktree(&self.layout.repo, &worktree, &item.branch, &self.layout.main)
             .await
             .context("creating git worktree")?;
         if item.base_commit.is_none() {
@@ -964,7 +964,7 @@ fn initial_prompt(layout: &Layout, pipeline: &Pipeline, item: &Item, step: &Step
         "# Work item {id}: {title}\n\n\
          - Issue: {issue}\n\
          - Step: {step_name} (`{step_id}`), run {n}, iteration {iter} of max {max}\n\
-         - Working directory: `{wt}` (git worktree, branch `{branch}`)\n\
+         - Working directory: `{wt}` (git worktree, branch `{branch}`, created from `{main}`)\n\
          - Work item folder: `{dir}`\n\
          - Issue text: `{dir}/issue.md`\n\n\
          ## Earlier messages (oldest first, in the work item folder)\n\n{messages}\n\n\
@@ -980,6 +980,7 @@ fn initial_prompt(layout: &Layout, pipeline: &Pipeline, item: &Item, step: &Step
         max = pipeline.max_iterations,
         wt = layout.worktree(&item.id).display(),
         branch = item.branch,
+        main = layout.main,
         dir = dir.display(),
         history = if history.is_empty() { "(this is the first run)".into() } else { history },
         notes = notes_section(notes),
@@ -1013,7 +1014,7 @@ mod tests {
     fn setup(name: &str) -> (Layout, Pipeline, Item) {
         let root = std::env::temp_dir().join(format!("claudechain-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let layout = Layout { repo: root.clone(), data: root.join("data") };
+        let layout = Layout { repo: root.clone(), data: root.join("data"), main: "main".into() };
         let pipeline = config::load_or_init(&layout.data).unwrap();
         let now = Utc::now();
         let item = Item {
