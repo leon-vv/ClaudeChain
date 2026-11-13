@@ -349,7 +349,7 @@ function itemCell(it) {
       tokens > 0 && h("span", { title: `${tokens.toLocaleString()} tokens over ${it.runs.length} runs; ≈ ${fmtCost(cost)} API-equivalent (covered by your subscription)` }, `${fmtTok(tokens)} tok`),
     ),
     it.status === "done" && h("div", { class: `state done` }, STATUS_LABEL.done),
-    it.pending_notes.length > 0 && h("div", { class: "detail" }, `📝 ${it.pending_notes.length} note(s) for the next run`),
+    it.pending_notes.length > 0 && h("div", { class: "detail" }, `💬 ${it.pending_notes.length} message(s) waiting for the next run`),
   );
 }
 // Last column: a small remove cross, shown once the item is done.
@@ -530,24 +530,36 @@ function renderInspectorChrome() {
 
 function renderComposer(item, run) {
   const actions = $("#composer-actions");
-  const text = () => $("#composer-text").value.trim();
-  const send = (mode) => act(async () => {
-    if (!text()) return toast("Type a message first");
-    await api("POST", `/api/items/${item.id}/message`, { text: text(), mode, run: run?.n });
-    $("#composer-text").value = "";
-    toast(mode === "live" ? "Sent to the agent" : mode === "note" ? "Saved for the next run" : "Run continues with your message");
+  const input = $("#composer-text");
+  const send = () => act(async () => {
+    const text = input.value.trim();
+    if (!text) return;
+    // The server picks the delivery: live, continue the session, or next run.
+    const res = await api("POST", `/api/items/${item.id}/message`, { text, mode: "auto", run: run?.n });
+    if (input.value.trim() === text) input.value = "";
+    const how = res?.delivered;
+    toast(how === "live" ? "Sent to the agent"
+      : how === "continue" ? "The agent continues with your message"
+      : "The agent will get your message when it starts");
   });
-  const live = item.status === "running" && run && !run.ended;
-  const canContinue = item.status !== "running" && run?.session_id;
-  actions.replaceChildren(...[
+  const live = item.status === "running";
+  const canContinue = !live && run?.session_id;
+  input.placeholder = live ? "Message the agent… (Enter to send, Shift+Enter for a new line)"
+    : canContinue ? `Message the agent to continue run #${run.n}…`
+    : "Message for the agent…";
+  input.onkeydown = (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      send();
+    }
+  };
+  actions.replaceChildren(
     h("span", { class: "hint" },
-      live ? "The agent sees your message on its next turn."
-        : canContinue ? `Continue resumes run #${run.n}'s session with full context; a note is added to the next run's prompt.`
-        : "Notes are added to the next run's prompt."),
-    live && h("button", { type: "button", class: "primary", onclick: () => send("live") }, "Send to agent"),
-    !live && canContinue && h("button", { type: "button", class: "primary", onclick: () => send("continue") }, "Continue this run"),
-    h("button", { type: "button", onclick: () => send("note") }, "Note for next run"),
-  ].filter(Boolean));
+      live ? "The agent reads your message right away, you don't have to wait for it to finish."
+        : canContinue ? `Sending resumes run #${run.n}'s session with full context.`
+        : "Your message is included when the agent starts."),
+    h("button", { type: "button", class: "primary", onclick: send }, "Send"),
+  );
 }
 
 function renderTab() {

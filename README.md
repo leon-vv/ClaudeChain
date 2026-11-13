@@ -37,9 +37,9 @@ Options: `--repo <path>`, `--data <dir>`, `--port`, `--host`, `--claude <path>`.
   permission mode, tools, allowed transitions). Column headers edit each step's prompt. Setting
   workers to 0 pauses a step.
 - **Click a cell** to inspect a run: live transcript, exact input, output files
-  and the branch diff. From there you can message a running agent, continue a
-  finished run, leave a note for the next run, or stop, retry, move or remove
-  the item.
+  and the branch diff. From there you can chat with the agent: messages reach a
+  running agent right away, and resume a finished run's session. You can also
+  stop, retry, move or remove the item.
 - **Resources**: plan usage and limits, an auto-pause threshold, token usage,
   and system load (Linux only).
 
