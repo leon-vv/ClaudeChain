@@ -200,6 +200,27 @@ impl App {
         }
     }
 
+    /// Ids of all items with the directories that hold their data (the item
+    /// folder and the worktree), for measuring disk usage.
+    pub fn item_dirs(&self) -> Vec<(String, Vec<std::path::PathBuf>)> {
+        let items = self.items.lock().unwrap();
+        items
+            .keys()
+            .map(|id| (id.clone(), vec![self.layout.item_dir(id), self.layout.worktree(id)]))
+            .collect()
+    }
+
+    /// Stores the measured disk usage per item (in memory; saved with the
+    /// item the next time it is saved). Only emits items whose value changed.
+    pub fn record_disk(&self, sizes: Vec<(String, u64)>) {
+        for (id, bytes) in sizes {
+            let changed = self.items.lock().unwrap().get(&id).is_some_and(|i| i.disk != Some(bytes));
+            if changed {
+                self.update_item_live(&id, |i| i.disk = Some(bytes));
+            }
+        }
+    }
+
     pub fn emit_account(&self) {
         self.emit(UiEvent::Limits { account: account_json(&self.account) });
     }
@@ -263,6 +284,7 @@ impl App {
             pending_resume: None,
             base_commit: None,
             pr_url: None,
+            disk: None,
         };
         {
             let mut items = self.items.lock().unwrap();
@@ -968,6 +990,7 @@ mod tests {
             pending_resume: None,
             base_commit: None,
             pr_url: None,
+            disk: None,
         };
         (layout, pipeline, item)
     }
