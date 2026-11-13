@@ -401,13 +401,17 @@ function stepCell(it, s) {
     td.append(h("div", { class: `state ${cls}${cls === "running" ? " pulse" : ""}`, title: tokTitle(live) },
       STATUS_LABEL[cls], live ? ` · ${fmtTok(tokTotal(live))}` : ""));
     const u = liveRun && !liveRun.ended ? liveRun.usage : null;
+    const disk = it.disk != null ? h("span", { class: "info", title: "Disk space used by this item (its folder and worktree)" }, `Disk ${fmtBytes(it.disk)}`) : null;
     if (u) {
       td.append(h("div", {
         class: "usage",
         title: `Agent and all its sub-processes (${u.processes} process${u.processes === 1 ? "" : "es"})\nCPU in % of one core · peak ${fmtCpu(u.cpu_max)}\nMemory peak ${fmtBytes(u.rss_max)}`,
       },
         h("span", { class: "info" }, `CPU ${fmtCpu(u.cpu)}`),
-        h("span", { class: "info" }, fmtBytes(u.rss))));
+        h("span", { class: "info" }, fmtBytes(u.rss)),
+        disk));
+    } else if (disk) {
+      td.append(h("div", { class: "usage" }, disk));
     }
     if (it.status === "awaiting_approval") {
       td.append(h("div", { class: "gate" },
