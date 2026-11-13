@@ -257,6 +257,19 @@ impl Item {
         self.since = Utc::now();
     }
 
+    /// Forgets all progress (runs, notes, PR, base commit) and queues the
+    /// item at `first_step`, as if it was just added. Identity fields
+    /// (id, number, title, url, created, branch) are kept.
+    pub fn reset(&mut self, first_step: &str) {
+        self.runs.clear();
+        self.pending_notes.clear();
+        self.pending_resume = None;
+        self.base_commit = None;
+        self.pr_url = None;
+        self.iteration = 0;
+        self.enter_step(first_step);
+    }
+
     pub fn set_status(&mut self, status: Status, detail: Option<String>) {
         self.status = status;
         self.status_detail = detail;

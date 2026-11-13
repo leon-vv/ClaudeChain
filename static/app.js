@@ -352,12 +352,18 @@ function itemCell(it) {
     it.pending_notes.length > 0 && h("div", { class: "detail" }, `📝 ${it.pending_notes.length} note(s) for the next run`),
   );
 }
-// Last column: a small remove cross, shown once the item is done.
+// Last column: restart and remove buttons, always shown.
 function rowActions(it) {
   return h("td", { class: "row-actions" },
-    it.status === "done" && h("button", {
+    h("button", {
+      class: "restart-x",
+      title: "Restart this item from scratch: redoes the whole work item from the first step and throws away all its previous messages, runs and results (stops its agent if running)",
+      "aria-label": "Restart",
+      onclick: () => restartItem(it.id),
+    }, "⏪"),
+    h("button", {
       class: "remove-x",
-      title: "Remove this finished item from the board",
+      title: "Remove this item from the board (stops its agent if running)",
       "aria-label": "Remove",
       onclick: () => removeItem(it.id),
     }, "✕"));
@@ -1202,8 +1208,13 @@ $("#insp-stop").onclick = () => act(() => api("POST", `/api/items/${S.insp.id}/s
 $("#insp-retry").onclick = () => act(() => api("POST", `/api/items/${S.insp.id}/retry`));
 $("#insp-move").onclick = () => moveDialog(S.items.get(S.insp.id));
 function removeItem(id) {
-  if (confirm(`Remove ${id} from the board? Its folder is moved to archive/ and its worktree is removed (the branch is kept).`)) {
+  if (confirm(`Remove ${id} from the board? A running agent is stopped. Its folder is moved to archive/ and its worktree is removed (the branch is kept).`)) {
     act(() => api("DELETE", `/api/items/${id}`));
+  }
+}
+function restartItem(id) {
+  if (confirm(`Restart ${id} from scratch? A running agent is stopped, all its messages, runs and results are deleted (only the issue is kept), and its worktree and local branch are deleted so the work starts again from the current HEAD. A branch or PR already pushed to GitHub is not touched.`)) {
+    act(() => api("POST", `/api/items/${id}/restart`));
   }
 }
 $("#insp-remove").onclick = () => removeItem(S.insp.id);

@@ -140,6 +140,8 @@ textarea { width: 100%; resize: vertical; font-family: var(--mono); font-size: 1
 .board .row-actions { width: 1%; white-space: nowrap; text-align: right; vertical-align: middle; }
 .row-actions button.remove-x { color: var(--bad); background: none; border-color: transparent; padding: 0 6px; font-size: 15px; line-height: 1.2; }
 .row-actions button.remove-x:hover { border-color: var(--bad); background: var(--bad-bg); }
+.row-actions button.restart-x { color: var(--muted); background: none; border-color: transparent; padding: 0 6px; font-size: 13px; line-height: 1.2; }
+.row-actions button.restart-x:hover { color: var(--accent); border-color: var(--accent); background: var(--panel-2); }
 .brand #btn-add { align-self: center; }
 
 .cell { cursor: pointer; min-height: 48px; }
