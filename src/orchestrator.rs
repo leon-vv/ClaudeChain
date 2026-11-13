@@ -595,6 +595,10 @@ impl App {
         .map(String::from)
         .to_vec();
         args.push(self.layout.item_dir(id).display().to_string());
+        if let Some(effort) = &step.effort {
+            args.push("--effort".into());
+            args.push(effort.clone());
+        }
         if let Some(sid) = &resume_session {
             args.push("--resume".into());
             args.push(sid.clone());
@@ -603,6 +607,7 @@ impl App {
         let input = json!({
             "step": step.id,
             "model": step.model,
+            "effort": step.effort,
             "tools": step.tools,
             "permission_mode": step.permission_mode,
             "cwd": worktree,

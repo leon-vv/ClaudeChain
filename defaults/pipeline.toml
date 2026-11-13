@@ -1,5 +1,7 @@
 # ClaudeChain pipeline. Prompts live in prompts/general.md and prompts/<id>.md.
 # Model, workers and approval can also be changed from the web UI.
+# Optional per step: effort = "low" | "medium" | "high" | "xhigh" | "max"
+# (passed to `claude --effort`; omit it to use Claude's default).
 
 # Maximum number of backward moves (e.g. Build/Test -> Implementation) per item
 # before it is handed to a human.

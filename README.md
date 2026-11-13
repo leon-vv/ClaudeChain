@@ -33,8 +33,11 @@ Options: `--repo <path>`, `--data <dir>`, `--port`, `--host`, `--claude <path>`.
 ## Using it
 
 - **+ Add issue**: a GitHub issue URL, `#123`, or plain text.
-- **Pipeline**: add, reorder and configure steps (model, workers, approval,
-  permission mode, tools, allowed transitions). Column headers edit each step's prompt. Setting
+- **Pipeline**: add, reorder and configure steps (model, thinking level,
+  workers, approval, permission mode, tools, allowed transitions). The thinking
+  level (`effort` in `pipeline.toml`: low, medium, high, xhigh or max) is passed
+  to `claude --effort`; leave it unset for Claude's default. Column headers edit
+  each step's model, thinking level and prompt. Setting
   workers to 0 pauses a step.
 - **Click a cell** to inspect a run: live transcript, exact input, output files
   and the branch diff. From there you can message a running agent, continue a
