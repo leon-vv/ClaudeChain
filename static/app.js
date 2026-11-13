@@ -289,6 +289,16 @@ function renderBoard() {
   board.replaceChildren(h("thead", {}, head), h("tbody", {}, rows));
 }
 
+// Thinking levels for `claude --effort`; "" means Claude's default (no flag).
+const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+
+function effortOptions(current, defaultLabel) {
+  return [
+    h("option", { value: "", selected: !current }, defaultLabel),
+    ...EFFORT_LEVELS.map((e) => h("option", { value: e, selected: e === current }, e)),
+  ];
+}
+
 function stepHeader(s, busy) {
   const models = [...new Set([...S.pipeline.models, s.model])];
   const put = (body) => act(() => api("PUT", `/api/steps/${s.id}`, body));
@@ -300,6 +310,8 @@ function stepHeader(s, busy) {
       h("div", { class: "row" },
         h("select", { title: "Model", onchange: (e) => put({ model: e.target.value }) },
           models.map((m) => h("option", { value: m, selected: m === s.model }, shortModel(m)))),
+        h("select", { title: "Thinking level (claude --effort)", onchange: (e) => put({ effort: e.target.value }) },
+          effortOptions(s.effort, "effort: default")),
       ),
       h("div", { class: "row" },
         h("button", { class: "small", title: `${s.name} prompt`, onclick: () => editPrompt(s.id, `${s.name} prompt`) }, "Edit prompt"),
@@ -675,6 +687,7 @@ function renderInput(body, d) {
   body.append(
     kv([
       ["Model", i.model],
+      ["Effort", i.effort],
       ["Step", stepName(i.step)],
       ["Tools", (i.tools || []).join(", ")],
       ["Permission mode", i.permission_mode],
@@ -965,6 +978,7 @@ function pipelineDialog() {
   const applyPreset = (step, p) => {
     step.name = p.name;
     step.model = p.model;
+    step.effort = p.effort ?? null;
     step.max_workers = p.max_workers;
     step.require_approval = p.require_approval;
     step.permission_mode = p.permission_mode;
@@ -1013,6 +1027,8 @@ function pipelineDialog() {
         h("span", { class: "lbl" }, "Model"),
         h("div", { class: "inline" },
           h("select", { onchange: (e) => (step.model = e.target.value) }, models.map((m) => h("option", { value: m, selected: m === step.model }, m))),
+          h("label", { title: "Thinking level (claude --effort)" }, "effort",
+            h("select", { onchange: (e) => (step.effort = e.target.value || null) }, effortOptions(step.effort, "default"))),
           h("label", {}, "workers", h("input", { type: "number", min: 0, max: 32, value: step.max_workers, onchange: (e) => (step.max_workers = Math.max(0, parseInt(e.target.value, 10) || 0)) })),
           check("requires approval", step.require_approval, (v) => (step.require_approval = v)),
           h("label", { title: "claude --permission-mode" }, "permissions",

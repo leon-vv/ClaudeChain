@@ -223,6 +223,8 @@ async fn put_settings(Cur(app): Cur, Json(s): Json<Settings>) -> ApiResult<Json<
 struct StepUpdate {
     name: Option<String>,
     model: Option<String>,
+    /// Thinking level; an empty string resets it to Claude's default.
+    effort: Option<String>,
     max_workers: Option<usize>,
     require_approval: Option<bool>,
 }
@@ -238,6 +240,16 @@ fn apply_step_update(s: &mut config::Step, u: StepUpdate) -> anyhow::Result<()> 
     }
     if let Some(m) = u.model {
         s.model = m;
+    }
+    if let Some(e) = u.effort {
+        let e = e.trim();
+        if e.is_empty() {
+            s.effort = None;
+        } else if config::EFFORT_LEVELS.contains(&e) {
+            s.effort = Some(e.to_string());
+        } else {
+            anyhow::bail!("unknown effort '{e}': use one of {}", config::EFFORT_LEVELS.join(", "));
+        }
     }
     if let Some(w) = u.max_workers {
         s.max_workers = w;
@@ -265,6 +277,7 @@ mod tests {
             id: "review".into(),
             name: "Review".into(),
             model: "claude-opus-5-5".into(),
+            effort: None,
             max_workers: 1,
             require_approval: false,
             allowed_targets: vec!["next".into()],
@@ -299,6 +312,17 @@ mod tests {
         apply_step_update(&mut s, StepUpdate { max_workers: Some(3), ..Default::default() }).unwrap();
         assert_eq!(s.name, "Review");
         assert_eq!(s.max_workers, 3);
+    }
+
+    #[test]
+    fn effort_set_clear_and_reject() {
+        let mut s = step();
+        apply_step_update(&mut s, StepUpdate { effort: Some("high".into()), ..Default::default() }).unwrap();
+        assert_eq!(s.effort.as_deref(), Some("high"));
+        assert!(apply_step_update(&mut s, StepUpdate { effort: Some("extreme".into()), ..Default::default() }).is_err());
+        assert_eq!(s.effort.as_deref(), Some("high"));
+        apply_step_update(&mut s, StepUpdate { effort: Some(String::new()), ..Default::default() }).unwrap();
+        assert_eq!(s.effort, None);
     }
 }
 
