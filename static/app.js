@@ -154,6 +154,7 @@ async function load() {
   S.repo = st.repo;
   S.data = st.data ?? null;
   S.defaultData = st.default_data ?? null;
+  S.main = st.main ?? null;
   S.recent = st.recent || [];
   S.home = st.home;
   S.pipeline = st.pipeline ?? null;
@@ -162,7 +163,7 @@ async function load() {
   S.items = new Map((st.items || []).map((i) => [i.id, i]));
   // The folder name keeps the header on one line; the tooltip has the full path.
   $("#repo-path").textContent = st.repo ? st.repo.replace(/\/+$/, "").split("/").pop() : "no repository";
-  $("#repo").title = st.repo ? `Repository ${st.repo}\nData ${st.data}\n\nClick to open another repository` : "Open a repository";
+  $("#repo").title = st.repo ? `Repository ${st.repo}\nData ${st.data}\nMain branch ${st.main}\n\nClick to open another repository` : "Open a repository";
   $("#btn-add").disabled = !st.repo;
   $("#no-repo").hidden = !!st.repo;
   // Without a repository the page is a landing page: no top bar, just a card for opening one.
@@ -186,12 +187,12 @@ function renderLanding() {
     const data = r.data === `${r.repo.replace(/\/+$/, "")}/.claudechain` ? null : r.data;
     return h("li", {},
       h("button", {
-        title: `Open ${r.repo}\nData ${r.data}`,
+        title: `Open ${r.repo}\nData ${r.data}${r.main ? `\nMain branch ${r.main}` : ""}`,
         onclick: async (e) => {
           const btn = e.currentTarget;
           btn.disabled = true;
           try {
-            await api("POST", "/api/workspace", { repo: r.repo, data });
+            await api("POST", "/api/workspace", { repo: r.repo, data, main: r.main || null });
             await load();
           } catch (err) {
             toast(err.message);
@@ -878,8 +879,16 @@ function folderBrowser(onSelect) {
 function workspaceDialog() {
   const repo = h("input", { type: "text", value: S.repo ?? "", placeholder: "/path/to/your/repository" });
   const data = h("input", { type: "text", value: S.data && S.data !== S.defaultData ? S.data : "" });
+  const main = h("input", { type: "text", value: S.main ?? "", placeholder: "default: remembered, else the remote's default branch" });
   const updatePlaceholder = () => (data.placeholder = repo.value.trim() ? `default: ${repo.value.trim().replace(/\/$/, "")}/.claudechain` : "default: <repository>/.claudechain");
-  repo.oninput = updatePlaceholder;
+  // A different repository gets its own remembered main branch (or the default).
+  const sameRepo = (a, b) => a.replace(/\/+$/, "") === b.replace(/\/+$/, "");
+  const repoChanged = () => {
+    updatePlaceholder();
+    const r = repo.value.trim();
+    main.value = (r && sameRepo(r, S.repo ?? "") ? S.main : S.recent.find((x) => sameRepo(x.repo, r))?.main) ?? "";
+  };
+  repo.oninput = repoChanged;
   updatePlaceholder();
   // Clicking a folder fills the most recently focused input (Repository by default).
   let target = repo;
@@ -893,12 +902,13 @@ function workspaceDialog() {
   setTarget(repo);
   const browser = folderBrowser((path) => {
     target.value = path;
-    updatePlaceholder();
+    if (target === repo) repoChanged();
+    else updatePlaceholder();
   });
   const recent = S.recent.length
     ? h("div", {}, h("label", {}, "Recent"), h("div", { class: "recent" }, S.recent.map((r) =>
-        h("button", { onclick: () => { repo.value = r.repo; data.value = r.data === `${r.repo}/.claudechain` ? "" : r.data; updatePlaceholder(); } },
-          r.repo, h("small", {}, `data: ${r.data}`)))))
+        h("button", { onclick: () => { repo.value = r.repo; data.value = r.data === `${r.repo}/.claudechain` ? "" : r.data; main.value = r.main || ""; updatePlaceholder(); } },
+          r.repo, h("small", {}, `data: ${r.data}${r.main ? ` · main branch: ${r.main}` : ""}`)))))
     : "";
   dialog("Open repository", [
     h("p", { class: "help" }, "ClaudeChain works on one git repository at a time. Its pipeline, prompts, work items and worktrees are kept in the data directory, so each repository keeps its own setup. Switching is only possible while no agents are running."),
@@ -906,7 +916,8 @@ function workspaceDialog() {
     browser.el,
     h("label", {}, "Repository"), h("div", { class: "field" }, repo),
     h("label", {}, "Data directory (optional)"), h("div", { class: "field" }, data),
-  ], () => api("POST", "/api/workspace", { repo: repo.value, data: data.value || null }), "Open", true);
+    h("label", { title: "New work items get their worktree branch from this local branch." }, "Main branch (optional)"), h("div", { class: "field" }, main),
+  ], () => api("POST", "/api/workspace", { repo: repo.value, data: data.value || null, main: main.value.trim() || null }), "Open", true);
   browser.go(S.repo ? S.repo.replace(/\/[^/]+\/?$/, "") || "/" : "");
 }
 

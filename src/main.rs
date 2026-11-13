@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
         None => ws.recent().into_iter().next().map(|r| (r.repo, Some(r.data))),
     };
     if let Some((repo, data)) = initial
-        && let Err(e) = ws.open(&repo, data.as_deref()).await {
+        && let Err(e) = ws.open(&repo, data.as_deref(), None).await {
             tracing::warn!("could not open {}: {e:#}; pick a repository in the web UI", repo.display());
         }
 

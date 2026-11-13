@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 use tokio::sync::broadcast;
 
@@ -81,13 +81,25 @@ impl Workspace {
         self.account.recent()
     }
 
-    /// Opens `repo` (with its data directory), replacing the current one.
-    pub async fn open(&self, repo: &Path, data: Option<&Path>) -> Result<()> {
+    /// Opens `repo` (with its data directory and main branch), replacing the
+    /// current one. Without `main`, the branch remembered for this repository
+    /// is used, else the one git suggests.
+    pub async fn open(&self, repo: &Path, data: Option<&Path>, main: Option<&str>) -> Result<()> {
         let _guard = self.switching.lock().await;
         let repo = std::fs::canonicalize(repo).with_context(|| format!("{} does not exist", repo.display()))?;
         git::check_repo(&repo)
             .await
             .map_err(|_| anyhow!("{} is not a git repository", repo.display()))?;
+        let main = match main.map(str::trim).filter(|m| !m.is_empty()) {
+            Some(m) => m.to_string(),
+            None => match self.recent().into_iter().find(|r| r.repo == repo && !r.main.is_empty()) {
+                Some(r) => r.main,
+                None => git::default_branch(&repo).await?,
+            },
+        };
+        if !git::branch_exists(&repo, &main).await? {
+            bail!("branch '{main}' does not exist in {}", repo.display());
+        }
         let data = match data {
             Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
             _ => default_data_dir(&repo),
@@ -96,19 +108,20 @@ impl Workspace {
         let data = std::fs::canonicalize(&data)?;
 
         if let Some(cur) = self.app()
-            && cur.layout.repo == repo && cur.layout.data == data {
+            && cur.layout.repo == repo && cur.layout.data == data && cur.layout.main == main {
                 return Ok(());
             }
         git::exclude_path(&repo, &data).await?;
-        let app = App::new(Layout { repo: repo.clone(), data: data.clone() }, self.claude.clone(), self.events.clone(), self.account.clone())?;
+        let layout = Layout { repo: repo.clone(), data: data.clone(), main: main.clone() };
+        let app = App::new(layout, self.claude.clone(), self.events.clone(), self.account.clone())?;
 
         if let Some(old) = self.app() {
             old.close()?;
         }
         tokio::spawn(app.clone().scheduler());
         *self.current.write().unwrap() = Some(app);
-        tracing::info!("opened repo {} (data {})", repo.display(), data.display());
-        self.account.remember(Recent { repo, data });
+        tracing::info!("opened repo {} (data {}, main branch {main})", repo.display(), data.display());
+        self.account.remember(Recent { repo, data, main });
         let _ = self.events.send(UiEvent::Workspace);
         Ok(())
     }
