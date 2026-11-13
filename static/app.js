@@ -289,6 +289,16 @@ function renderBoard() {
   board.replaceChildren(h("thead", {}, head), h("tbody", {}, rows));
 }
 
+// Thinking levels for `claude --effort`; "" means Claude's default (no flag).
+const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+
+function effortOptions(current, defaultLabel) {
+  return [
+    h("option", { value: "", selected: !current }, defaultLabel),
+    ...EFFORT_LEVELS.map((e) => h("option", { value: e, selected: e === current }, e)),
+  ];
+}
+
 function stepHeader(s, busy) {
   const models = [...new Set([...S.pipeline.models, s.model])];
   const put = (body) => act(() => api("PUT", `/api/steps/${s.id}`, body));
@@ -300,6 +310,8 @@ function stepHeader(s, busy) {
       h("div", { class: "row" },
         h("select", { title: "Model", onchange: (e) => put({ model: e.target.value }) },
           models.map((m) => h("option", { value: m, selected: m === s.model }, shortModel(m)))),
+        h("select", { title: "Thinking level (claude --effort)", onchange: (e) => put({ effort: e.target.value }) },
+          effortOptions(s.effort, "effort: default")),
       ),
       h("div", { class: "row" },
         h("button", { class: "small", title: `${s.name} prompt`, onclick: () => editPrompt(s.id, `${s.name} prompt`) }, "Edit prompt"),
@@ -352,12 +364,18 @@ function itemCell(it) {
     it.pending_notes.length > 0 && h("div", { class: "detail" }, `💬 ${it.pending_notes.length} message(s) waiting for the next run`),
   );
 }
-// Last column: a small remove cross, shown once the item is done.
+// Last column: restart and remove buttons, always shown.
 function rowActions(it) {
   return h("td", { class: "row-actions" },
-    it.status === "done" && h("button", {
+    h("button", {
+      class: "restart-x",
+      title: "Restart this item from scratch: redoes the whole work item from the first step and throws away all its previous messages, runs and results (stops its agent if running)",
+      "aria-label": "Restart",
+      onclick: () => restartItem(it.id),
+    }, "⏪"),
+    h("button", {
       class: "remove-x",
-      title: "Remove this finished item from the board",
+      title: "Remove this item from the board (stops its agent if running)",
       "aria-label": "Remove",
       onclick: () => removeItem(it.id),
     }, "✕"));
@@ -401,13 +419,17 @@ function stepCell(it, s) {
     td.append(h("div", { class: `state ${cls}${cls === "running" ? " pulse" : ""}`, title: tokTitle(live) },
       STATUS_LABEL[cls], live ? ` · ${fmtTok(tokTotal(live))}` : ""));
     const u = liveRun && !liveRun.ended ? liveRun.usage : null;
+    const disk = it.disk != null ? h("span", { class: "info", title: "Disk space used by this item (its folder and worktree)" }, `Disk ${fmtBytes(it.disk)}`) : null;
     if (u) {
       td.append(h("div", {
         class: "usage",
         title: `Agent and all its sub-processes (${u.processes} process${u.processes === 1 ? "" : "es"})\nCPU in % of one core · peak ${fmtCpu(u.cpu_max)}\nMemory peak ${fmtBytes(u.rss_max)}`,
       },
         h("span", { class: "info" }, `CPU ${fmtCpu(u.cpu)}`),
-        h("span", { class: "info" }, fmtBytes(u.rss))));
+        h("span", { class: "info" }, fmtBytes(u.rss)),
+        disk));
+    } else if (disk) {
+      td.append(h("div", { class: "usage" }, disk));
     }
     if (it.status === "awaiting_approval") {
       td.append(h("div", { class: "gate" },
@@ -687,6 +709,7 @@ function renderInput(body, d) {
   body.append(
     kv([
       ["Model", i.model],
+      ["Effort", i.effort],
       ["Step", stepName(i.step)],
       ["Tools", (i.tools || []).join(", ")],
       ["Permission mode", i.permission_mode],
@@ -977,6 +1000,7 @@ function pipelineDialog() {
   const applyPreset = (step, p) => {
     step.name = p.name;
     step.model = p.model;
+    step.effort = p.effort ?? null;
     step.max_workers = p.max_workers;
     step.require_approval = p.require_approval;
     step.permission_mode = p.permission_mode;
@@ -1025,6 +1049,8 @@ function pipelineDialog() {
         h("span", { class: "lbl" }, "Model"),
         h("div", { class: "inline" },
           h("select", { onchange: (e) => (step.model = e.target.value) }, models.map((m) => h("option", { value: m, selected: m === step.model }, m))),
+          h("label", { title: "Thinking level (claude --effort)" }, "effort",
+            h("select", { onchange: (e) => (step.effort = e.target.value || null) }, effortOptions(step.effort, "default"))),
           h("label", {}, "workers", h("input", { type: "number", min: 0, max: 32, value: step.max_workers, onchange: (e) => (step.max_workers = Math.max(0, parseInt(e.target.value, 10) || 0)) })),
           check("requires approval", step.require_approval, (v) => (step.require_approval = v)),
           h("label", { title: "claude --permission-mode" }, "permissions",
@@ -1214,8 +1240,13 @@ $("#insp-stop").onclick = () => act(() => api("POST", `/api/items/${S.insp.id}/s
 $("#insp-retry").onclick = () => act(() => api("POST", `/api/items/${S.insp.id}/retry`));
 $("#insp-move").onclick = () => moveDialog(S.items.get(S.insp.id));
 function removeItem(id) {
-  if (confirm(`Remove ${id} from the board? Its folder is moved to archive/ and its worktree is removed (the branch is kept).`)) {
+  if (confirm(`Remove ${id} from the board? A running agent is stopped. Its folder is moved to archive/ and its worktree is removed (the branch is kept).`)) {
     act(() => api("DELETE", `/api/items/${id}`));
+  }
+}
+function restartItem(id) {
+  if (confirm(`Restart ${id} from scratch? A running agent is stopped, all its messages, runs and results are deleted (only the issue is kept), and its worktree and local branch are deleted so the work starts again from the current HEAD. A branch or PR already pushed to GitHub is not touched.`)) {
+    act(() => api("POST", `/api/items/${id}/restart`));
   }
 }
 $("#insp-remove").onclick = () => removeItem(S.insp.id);

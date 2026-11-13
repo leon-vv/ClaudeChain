@@ -203,6 +203,27 @@ impl App {
         }
     }
 
+    /// Ids of all items with the directories that hold their data (the item
+    /// folder and the worktree), for measuring disk usage.
+    pub fn item_dirs(&self) -> Vec<(String, Vec<std::path::PathBuf>)> {
+        let items = self.items.lock().unwrap();
+        items
+            .keys()
+            .map(|id| (id.clone(), vec![self.layout.item_dir(id), self.layout.worktree(id)]))
+            .collect()
+    }
+
+    /// Stores the measured disk usage per item (in memory; saved with the
+    /// item the next time it is saved). Only emits items whose value changed.
+    pub fn record_disk(&self, sizes: Vec<(String, u64)>) {
+        for (id, bytes) in sizes {
+            let changed = self.items.lock().unwrap().get(&id).is_some_and(|i| i.disk != Some(bytes));
+            if changed {
+                self.update_item_live(&id, |i| i.disk = Some(bytes));
+            }
+        }
+    }
+
     pub fn emit_account(&self) {
         self.emit(UiEvent::Limits { account: account_json(&self.account) });
     }
@@ -266,6 +287,7 @@ impl App {
             pending_resume: None,
             base_commit: None,
             pr_url: None,
+            disk: None,
         };
         {
             let mut items = self.items.lock().unwrap();
@@ -285,7 +307,7 @@ impl App {
     /// Removes an item from the board. Its folder is moved to `archive/`;
     /// the worktree is removed but the branch is kept.
     pub async fn remove_item(&self, id: &str) -> Result<()> {
-        self.stop(id).ok();
+        self.halt(id, "Removing…").await?;
         let item = self.items.lock().unwrap().remove(id).ok_or_else(|| anyhow!("no item '{id}'"))?;
         if let Some(c) = self.running.lock().unwrap().remove(id) {
             drop(c);
@@ -299,6 +321,58 @@ impl App {
         std::fs::rename(self.layout.item_dir(id), target)?;
         self.emit(UiEvent::ItemRemoved { id: id.to_string() });
         Ok(())
+    }
+
+    /// Stops the item's agent (if any) and waits until its run has really
+    /// finished, then parks the item as needing the human (with `detail`)
+    /// so the scheduler won't start a new run while it is being removed or
+    /// restarted.
+    async fn halt(&self, id: &str, detail: &str) -> Result<()> {
+        // ~30 s: the runner kills the process on stop, so this is plenty.
+        for _ in 0..300 {
+            {
+                let mut items = self.items.lock().unwrap();
+                let item = items.get_mut(id).ok_or_else(|| anyhow!("no item '{id}'"))?;
+                if item.status != Status::Running {
+                    item.set_status(Status::NeedsHuman, Some(detail.to_string()));
+                    store::save_item(&self.layout, item)?;
+                    self.emit(UiEvent::Item { item: Box::new(item.clone()) });
+                    return Ok(());
+                }
+            }
+            // The run may still be starting (no control registered yet), so
+            // keep sending the stop signal until it has ended.
+            self.stop(id).ok();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        bail!("{id} did not stop in time; try again")
+    }
+
+    /// Restarts an item from scratch: stops its agent, deletes its runs and
+    /// messages (only `issue.md` is kept), removes its worktree and local
+    /// branch (both are re-created from the repo's HEAD on the next run; a
+    /// pushed branch or PR on GitHub is left alone) and queues it at the
+    /// first step.
+    pub async fn restart_item(&self, id: &str) -> Result<()> {
+        self.halt(id, "Restarting…").await?;
+        let branch = self.items.lock().unwrap().get(id).map(|i| i.branch.clone()).ok_or_else(|| anyhow!("no item '{id}'"))?;
+        git::remove_worktree(&self.layout.repo, &self.layout.worktree(id))
+            .await
+            .context("removing worktree")?;
+        git::delete_branch(&self.layout.repo, &branch).await.context("deleting branch")?;
+        let dir = self.layout.item_dir(id);
+        for sub in ["runs", "messages"] {
+            let path = dir.join(sub);
+            if path.exists() {
+                std::fs::remove_dir_all(&path).with_context(|| format!("removing {}", path.display()))?;
+            }
+        }
+        std::fs::create_dir_all(dir.join("messages"))?;
+        let first = self.pipeline().steps[0].id.clone();
+        self.update_item(id, |item| {
+            item.reset(&first);
+            Ok(())
+        })
     }
 
     // ---- Human controls ----------------------------------------------
@@ -636,6 +710,10 @@ impl App {
         .map(String::from)
         .to_vec();
         args.push(self.layout.item_dir(id).display().to_string());
+        if let Some(effort) = &step.effort {
+            args.push("--effort".into());
+            args.push(effort.clone());
+        }
         if let Some(sid) = &resume_session {
             args.push("--resume".into());
             args.push(sid.clone());
@@ -644,6 +722,7 @@ impl App {
         let input = json!({
             "step": step.id,
             "model": step.model,
+            "effort": step.effort,
             "tools": step.tools,
             "permission_mode": step.permission_mode,
             "cwd": worktree,
@@ -955,6 +1034,7 @@ mod tests {
             pending_resume: None,
             base_commit: None,
             pr_url: None,
+            disk: None,
         };
         (layout, pipeline, item)
     }
@@ -1055,6 +1135,31 @@ mod tests {
         finish_run(&layout, &pipeline, &mut item, n, ok());
         assert_eq!(item.status, Status::Done);
         assert_eq!(item.pr_url.as_deref(), Some("https://github.com/o/r/pull/1"));
+    }
+
+    #[test]
+    fn reset_forgets_progress_but_keeps_identity() {
+        let (layout, pipeline, mut item) = setup("reset");
+        let t = r#"{"to":"next","summary":"s","pr_url":"https://github.com/o/r/pull/1"}"#;
+        let n = start_run(&layout, &mut item, "pull_request", Some(t));
+        finish_run(&layout, &pipeline, &mut item, n, ok());
+        item.iteration = 2;
+        item.base_commit = Some("abc".into());
+        item.pending_notes.push(Note { at: Utc::now(), text: "x".into() });
+        let first = pipeline.steps[0].id.clone();
+        item.reset(&first);
+        assert!(item.runs.is_empty());
+        assert!(item.pending_notes.is_empty());
+        assert!(item.pending_resume.is_none());
+        assert!(item.base_commit.is_none());
+        assert!(item.pr_url.is_none());
+        assert_eq!(item.iteration, 0);
+        assert!(!item.approved);
+        assert_eq!(item.step, first);
+        assert_eq!(item.status, Status::Queued);
+        assert_eq!(item.id, "item-1");
+        assert_eq!(item.branch, "claudechain/item-1");
+        assert_eq!(item.next_run_number(), 1);
     }
 
     #[test]

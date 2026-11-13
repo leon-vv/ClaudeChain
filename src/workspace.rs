@@ -48,12 +48,26 @@ impl Workspace {
 
     /// Samples system resources forever (for the Resources page).
     pub async fn monitor_loop(self: Arc<Self>) {
+        let mut last_disk: Option<std::time::Instant> = None;
         loop {
             let disk = self.app().map(|a| a.layout.data.clone());
             let ws = self.clone();
             let _ = tokio::task::spawn_blocking(move || ws.monitor.sample(disk.as_deref())).await;
             if let Some(app) = self.app() {
                 app.record_usage(&self.monitor);
+                if last_disk.is_none_or(|t| t.elapsed() >= crate::sysmon::DISK_INTERVAL) {
+                    last_disk = Some(std::time::Instant::now());
+                    let dirs = app.item_dirs();
+                    let sizes = tokio::task::spawn_blocking(move || {
+                        dirs.into_iter()
+                            .map(|(id, paths)| (id, paths.iter().map(|p| crate::sysmon::dir_size(p)).sum()))
+                            .collect::<Vec<(String, u64)>>()
+                    })
+                    .await;
+                    if let Ok(sizes) = sizes {
+                        app.record_disk(sizes);
+                    }
+                }
             }
             tokio::time::sleep(crate::sysmon::INTERVAL).await;
         }
