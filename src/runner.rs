@@ -12,6 +12,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::reaper;
+
 pub struct RunSpec {
     pub program: String,
     pub args: Vec<String>,
@@ -85,6 +87,15 @@ fn from_cargo_run(k: &str) -> bool {
     ) || k.starts_with("CARGO_PKG_")
 }
 
+/// Kills the agent's leftover processes when dropped.
+struct Sweep(String);
+
+impl Drop for Sweep {
+    fn drop(&mut self) {
+        reaper::kill_all(&self.0, None);
+    }
+}
+
 /// Runs the agent to completion. `on_event` sees every event (CLI events and
 /// local ones) as it is appended to events.jsonl.
 pub async fn run(
@@ -109,6 +120,8 @@ pub async fn run(
         .stderr(Stdio::from(stderr_file))
         .kill_on_drop(true);
     scrub_env(&mut cmd);
+    let marker = reaper::new_marker();
+    cmd.env(reaper::MARKER_VAR, &marker);
     // If ClaudeChain dies (even by SIGKILL), take the agent down with it.
     #[cfg(target_os = "linux")]
     unsafe {
@@ -121,6 +134,9 @@ pub async fn run(
     }
     let mut child = cmd.spawn().with_context(|| format!("starting {}", spec.program))?;
     spec.pid.store(child.id().unwrap_or(0), Ordering::Relaxed);
+    // However the run ends (stopped, finished, errored, task dropped), take
+    // down whatever the agent left running: builds, servers, watchers.
+    let _sweep = Sweep(marker.clone());
     let mut stdin = child.stdin.take();
     let mut stdout = BufReader::new(child.stdout.take().expect("piped stdout")).lines();
 
@@ -182,6 +198,8 @@ pub async fn run(
                 result.stopped = true;
                 let ev = local_event("stopped", "Stopped by the human");
                 log(&mut events, &ev.to_string(), &ev).await;
+                let (marker, root) = (marker.clone(), child.id());
+                let _ = tokio::task::spawn_blocking(move || reaper::kill_all(&marker, root)).await;
                 let _ = child.start_kill();
             }
         }
