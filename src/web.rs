@@ -63,6 +63,7 @@ pub fn router(ws: Ws, allowed_hosts: Vec<String>) -> Router {
         .route("/api/fs", get(list_dir))
         .route("/api/resources", get(resources))
         .route("/api/limits", put(put_limits))
+        .route("/api/limits/refresh", post(refresh_limits))
         .route("/api/pipeline", put(put_pipeline))
         .route("/api/settings", put(put_settings))
         .route("/api/steps/{step}", put(put_step))
@@ -200,6 +201,17 @@ async fn put_limits(State(ws): State<Ws>, Json(l): Json<LimitSettings>) -> ApiRe
     ws.account.set_pause_above(l.pause_above);
     let account = orchestrator::account_json(&ws.account);
     let _ = ws.events.send(orchestrator::UiEvent::Limits { account: account.clone() });
+    Ok(Json(account))
+}
+
+/// Drops the recorded plan usage so runs held back by it start again.
+async fn refresh_limits(State(ws): State<Ws>) -> ApiResult<Json<Value>> {
+    ws.account.forget_limits();
+    let account = orchestrator::account_json(&ws.account);
+    let _ = ws.events.send(orchestrator::UiEvent::Limits { account: account.clone() });
+    if let Some(app) = ws.app() {
+        app.wake();
+    }
     Ok(Json(account))
 }
 

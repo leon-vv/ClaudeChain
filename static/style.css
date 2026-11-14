@@ -351,6 +351,8 @@ dialog #dialog-body { max-height: 72vh; overflow: auto; }
 .res-grid > .span2 { grid-column: 1 / -1; }
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; height: 100%; }
 .card h2 { font-size: 14px; margin: 0 0 10px; }
+.card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+.card-head h2 { margin: 0; }
 .card .help { color: var(--muted); font-size: 12.5px; margin: 0 0 10px; }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }

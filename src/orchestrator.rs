@@ -224,6 +224,11 @@ impl App {
         }
     }
 
+    /// Makes the scheduler look for work now instead of at its next tick.
+    pub fn wake(&self) {
+        self.wake.notify_one();
+    }
+
     pub fn emit_account(&self) {
         self.emit(UiEvent::Limits { account: account_json(&self.account) });
     }
