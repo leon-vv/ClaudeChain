@@ -2,6 +2,7 @@ mod account;
 mod config;
 mod git;
 mod orchestrator;
+mod reaper;
 mod runner;
 mod store;
 mod sysmon;
