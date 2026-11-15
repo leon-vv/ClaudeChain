@@ -99,6 +99,7 @@ pub fn router(ws: Ws, allowed_hosts: Vec<String>) -> Router {
         .route("/api/items/{id}/files", get(list_files))
         .route("/api/items/{id}/file", get(get_file))
         .route("/api/items/{id}/diff", get(get_diff))
+        .route("/mcp", post(crate::mcp::handle))
         .layer(middleware::from_fn(move |req, next| guard(allowed_hosts.clone(), req, next)))
         .with_state(ws)
 }
@@ -243,8 +244,9 @@ async fn put_limits(State(ws): State<Ws>, Json(l): Json<LimitSettings>) -> ApiRe
 async fn refresh_limits(State(ws): State<Ws>) -> ApiResult<Json<Value>> {
     ws.account.forget_limits();
     let account = orchestrator::account_json(&ws.account);
-    let _ = ws.events.send(orchestrator::UiEvent::Limits { account: account.clone() });
-    if let Some(app) = ws.app() {
+    let _ = ws.events.send(orchestrator::Envelope::global(orchestrator::UiEvent::Limits { account: account.clone() }));
+    // Plan limits are account-wide, so every open repository may resume.
+    for app in ws.apps() {
         app.wake();
     }
     Ok(Json(account))
