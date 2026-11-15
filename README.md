@@ -28,6 +28,13 @@ and items are stored in `<repo>/.claudechain`, which is added to
 `.git/info/exclude`. Recent repositories are remembered in
 `~/.config/claudechain/state.json`.
 
+Several repositories can be open at once, one per browser tab. The tab's
+repository is in its URL (`?repo=<id>`), so tabs survive a reload and can be
+bookmarked. Opening a repository switches only the current tab. Repositories
+that no tab shows keep running their agents until the server stops. They all
+share one Claude account, so its plan limits and pause threshold apply to the
+agents of all open repositories together.
+
 Options: `--repo <path>`, `--data <dir>`, `--port`, `--host`, `--claude <path>`.
 
 ## Using it
