@@ -3,6 +3,10 @@
 // ---- State ---------------------------------------------------------------
 
 const S = {
+  // Id of the repository this tab looks at. It lives in the page URL
+  // (?repo=<id>), not in localStorage, so each tab can show another one.
+  repoId: new URLSearchParams(location.search).get("repo"),
+  es: null, // EventSource for repoId
   repo: null,
   data: null,
   defaultData: null,
@@ -36,6 +40,8 @@ function h(tag, attrs = {}, ...children) {
 }
 
 async function api(method, path, body) {
+  // Every request is about this tab's repository (see web::RepoQuery).
+  if (S.repoId) path += `${path.includes("?") ? "&" : "?"}repo=${encodeURIComponent(S.repoId)}`;
   const res = await fetch(path, {
     method,
     // The server rejects changes without this header (see web::guard).
@@ -139,6 +145,39 @@ function fmtDuration(run) {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
 }
 
+/// "just now", "45s ago", "10m ago", "3h ago", "yesterday", "3 days ago", … "2 years ago".
+function fmtAgo(iso) {
+  const s = Math.max(0, Math.floor((Date.now() - new Date(iso)) / 1000));
+  if (s < 10) return "just now";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const hr = Math.floor(m / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const d = Math.floor(hr / 24);
+  const plural = (n, unit) => `${n} ${unit}${n === 1 ? "" : "s"} ago`;
+  if (d === 1) return "yesterday";
+  if (d < 7) return plural(d, "day");
+  if (d < 30) return plural(Math.floor(d / 7), "week");
+  if (d < 365) return plural(Math.max(1, Math.floor(d / 30)), "month");
+  return plural(Math.floor(d / 365), "year");
+}
+
+/// Elapsed time since `iso` as a clock: "3:23", or "1:03:23" past an hour.
+function fmtClock(iso) {
+  const s = Math.max(0, Math.floor((Date.now() - new Date(iso)) / 1000));
+  const ss = String(s % 60).padStart(2, "0");
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m}:${ss}` : `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}:${ss}`;
+}
+
+/// Refresh the text of every time label on the board without re-rendering it.
+function tickAgoLabels() {
+  for (const el of document.querySelectorAll(".cell .ago")) {
+    el.textContent = el.dataset.end ? fmtAgo(el.dataset.end) : fmtClock(el.dataset.start);
+  }
+}
+
 const STATUS_LABEL = {
   queued: "⏳ queued",
   awaiting_approval: "⏸ awaiting approval",
@@ -151,6 +190,9 @@ const STATUS_LABEL = {
 
 async function load() {
   const st = await api("GET", "/api/state");
+  // A tab without a repository in its URL gets the default one; pin it so
+  // opening another repository elsewhere doesn't change this tab.
+  if (st.id && st.id !== S.repoId) setRepoId(st.id);
   S.repo = st.repo;
   S.data = st.data ?? null;
   S.defaultData = st.default_data ?? null;
@@ -192,8 +234,7 @@ function renderLanding() {
           const btn = e.currentTarget;
           btn.disabled = true;
           try {
-            await api("POST", "/api/workspace", { repo: r.repo, data, main: r.main || null });
-            await load();
+            await openRepo({ repo: r.repo, data, main: r.main || null });
           } catch (err) {
             toast(err.message);
           } finally {
@@ -206,8 +247,31 @@ function renderLanding() {
   }));
 }
 
+/// Points this tab at repository `id`: the URL, the event stream and later API calls.
+function setRepoId(id) {
+  S.repoId = id;
+  const params = new URLSearchParams(location.search);
+  params.set("repo", id);
+  history.replaceState(null, "", `${location.pathname}?${params}${location.hash}`);
+  if (S.es?.repoId !== id) connect();
+}
+
+/// Opens a repository on the server and switches this tab to it. Other tabs
+/// keep showing theirs.
+async function openRepo(body) {
+  const { id } = await api("POST", "/api/workspace", body);
+  if (id !== S.repoId) {
+    closeInspector();
+    setRepoId(id);
+  }
+  await load();
+}
+
 function connect() {
-  const es = new EventSource("/api/events");
+  S.es?.close();
+  const es = new EventSource(S.repoId ? `/api/events?repo=${encodeURIComponent(S.repoId)}` : "/api/events");
+  es.repoId = S.repoId;
+  S.es = es;
   es.onopen = () => {
     $("#conn").classList.add("on");
     load();
@@ -232,7 +296,8 @@ function connect() {
         if (S.page === "resources") renderResources();
         break;
       case "workspace":
-        closeInspector();
+        // Some tab opened a repository; this tab keeps its own, but the
+        // recent list may have changed.
         load();
         break;
       case "pipeline":
@@ -405,6 +470,16 @@ function stepCell(it, s) {
     class: `cell${current ? " current" : ""}`,
     onclick: () => openInspector(it.id, runs.length ? runs[runs.length - 1].n : null),
   });
+  // Top-right time label: live clock while this step's run is going, else how long ago it finished.
+  const lastRun = runs[runs.length - 1];
+  if (lastRun) {
+    const live = current && it.status === "running" && !lastRun.ended && lastRun === it.runs[it.runs.length - 1];
+    if (live) {
+      td.append(h("span", { class: "ago running", "data-start": lastRun.started, title: `Running since ${new Date(lastRun.started).toLocaleString()}` }, fmtClock(lastRun.started)));
+    } else if (lastRun.ended) {
+      td.append(h("span", { class: "ago", "data-end": lastRun.ended, title: `Finished ${new Date(lastRun.ended).toLocaleString()}` }, fmtAgo(lastRun.ended)));
+    }
+  }
   if (runs.length) {
     td.append(h("div", { class: "chips" }, runs.map((r) =>
       h("span", {
@@ -911,13 +986,13 @@ function workspaceDialog() {
           r.repo, h("small", {}, `data: ${r.data}${r.main ? ` · main branch: ${r.main}` : ""}`)))))
     : "";
   dialog("Open repository", [
-    h("p", { class: "help" }, "ClaudeChain works on one git repository at a time. Its pipeline, prompts, work items and worktrees are kept in the data directory, so each repository keeps its own setup. Switching is only possible while no agents are running."),
+    h("p", { class: "help" }, "This tab switches to the repository you open. Repositories opened earlier stay open and keep running their agents; open another browser tab to look at several at the same time. The pipeline, prompts, work items and worktrees are kept in the data directory, so each repository keeps its own setup."),
     recent,
     browser.el,
     h("label", {}, "Repository"), h("div", { class: "field" }, repo),
     h("label", {}, "Data directory (optional)"), h("div", { class: "field" }, data),
     h("label", { title: "New work items get their worktree branch from this local branch." }, "Main branch (optional)"), h("div", { class: "field" }, main),
-  ], () => api("POST", "/api/workspace", { repo: repo.value, data: data.value || null, main: main.value.trim() || null }), "Open", true);
+  ], () => openRepo({ repo: repo.value, data: data.value || null, main: main.value.trim() || null }), "Open", true);
   browser.go(S.repo ? S.repo.replace(/\/[^/]+\/?$/, "") || "/" : "");
 }
 
@@ -1152,7 +1227,7 @@ function showPage(page) {
   $("#resources-page").hidden = page !== "resources";
   for (const b of document.querySelectorAll("#pages button")) b.classList.toggle("active", b.dataset.page === page);
   if (page !== "board") closeInspector();
-  if (location.hash !== (page === "board" ? "" : `#${page}`)) history.replaceState(null, "", page === "board" ? location.pathname : `#${page}`);
+  if (location.hash !== (page === "board" ? "" : `#${page}`)) history.replaceState(null, "", `${location.pathname}${location.search}${page === "board" ? "" : `#${page}`}`);
   if (page === "resources") startResources();
   else stopResources();
 }
@@ -1265,6 +1340,8 @@ $("#composer").onsubmit = (e) => e.preventDefault();
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && S.insp && !$("#dialog").open) closeInspector();
 });
+// Keep the time labels on the board current (live clocks tick every second).
+setInterval(tickAgoLabels, 1000);
 // Keep durations of running items ticking.
 setInterval(() => {
   if ([...S.items.values()].some((i) => i.status === "running")) {

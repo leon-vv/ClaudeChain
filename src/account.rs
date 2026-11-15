@@ -105,6 +105,14 @@ impl Account {
         changed
     }
 
+    /// Forgets the recorded usage, e.g. after the user reset their limit
+    /// outside ClaudeChain. The next agent run reports fresh values.
+    pub fn forget_limits(&self) {
+        let mut saved = self.saved.lock().unwrap();
+        saved.limits = None;
+        Self::save(&saved);
+    }
+
     pub fn pause_above(&self) -> Option<f64> {
         self.saved.lock().unwrap().pause_above
     }

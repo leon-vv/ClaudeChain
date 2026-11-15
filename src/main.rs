@@ -3,6 +3,7 @@ mod config;
 mod git;
 mod mcp;
 mod orchestrator;
+mod reaper;
 mod runner;
 mod store;
 mod sysmon;
