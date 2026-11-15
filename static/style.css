@@ -146,6 +146,11 @@ textarea { width: 100%; resize: vertical; font-family: var(--mono); font-size: 1
 
 .cell { cursor: pointer; min-height: 48px; }
 .cell:hover { background: var(--panel-2); }
+.cell .ago {
+  float: right; margin: 0 0 2px 6px; font-size: 11px; line-height: 18px; color: var(--muted);
+  font-variant-numeric: tabular-nums; white-space: nowrap; opacity: .85;
+}
+.cell .ago.running { color: var(--run); font-weight: 600; opacity: 1; }
 td.current { box-shadow: inset 3px 0 0 var(--accent); }
 .chips { display: flex; gap: 4px; flex-wrap: wrap; }
 .chip {
