@@ -139,6 +139,39 @@ function fmtDuration(run) {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
 }
 
+/// "just now", "45s ago", "10m ago", "3h ago", "yesterday", "3 days ago", … "2 years ago".
+function fmtAgo(iso) {
+  const s = Math.max(0, Math.floor((Date.now() - new Date(iso)) / 1000));
+  if (s < 10) return "just now";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const hr = Math.floor(m / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const d = Math.floor(hr / 24);
+  const plural = (n, unit) => `${n} ${unit}${n === 1 ? "" : "s"} ago`;
+  if (d === 1) return "yesterday";
+  if (d < 7) return plural(d, "day");
+  if (d < 30) return plural(Math.floor(d / 7), "week");
+  if (d < 365) return plural(Math.max(1, Math.floor(d / 30)), "month");
+  return plural(Math.floor(d / 365), "year");
+}
+
+/// Elapsed time since `iso` as a clock: "3:23", or "1:03:23" past an hour.
+function fmtClock(iso) {
+  const s = Math.max(0, Math.floor((Date.now() - new Date(iso)) / 1000));
+  const ss = String(s % 60).padStart(2, "0");
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m}:${ss}` : `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}:${ss}`;
+}
+
+/// Refresh the text of every time label on the board without re-rendering it.
+function tickAgoLabels() {
+  for (const el of document.querySelectorAll(".cell .ago")) {
+    el.textContent = el.dataset.end ? fmtAgo(el.dataset.end) : fmtClock(el.dataset.start);
+  }
+}
+
 const STATUS_LABEL = {
   queued: "⏳ queued",
   awaiting_approval: "⏸ awaiting approval",
@@ -405,6 +438,16 @@ function stepCell(it, s) {
     class: `cell${current ? " current" : ""}`,
     onclick: () => openInspector(it.id, runs.length ? runs[runs.length - 1].n : null),
   });
+  // Top-right time label: live clock while this step's run is going, else how long ago it finished.
+  const lastRun = runs[runs.length - 1];
+  if (lastRun) {
+    const live = current && it.status === "running" && !lastRun.ended && lastRun === it.runs[it.runs.length - 1];
+    if (live) {
+      td.append(h("span", { class: "ago running", "data-start": lastRun.started, title: `Running since ${new Date(lastRun.started).toLocaleString()}` }, fmtClock(lastRun.started)));
+    } else if (lastRun.ended) {
+      td.append(h("span", { class: "ago", "data-end": lastRun.ended, title: `Finished ${new Date(lastRun.ended).toLocaleString()}` }, fmtAgo(lastRun.ended)));
+    }
+  }
   if (runs.length) {
     td.append(h("div", { class: "chips" }, runs.map((r) =>
       h("span", {
@@ -1265,6 +1308,8 @@ $("#composer").onsubmit = (e) => e.preventDefault();
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && S.insp && !$("#dialog").open) closeInspector();
 });
+// Keep the time labels on the board current (live clocks tick every second).
+setInterval(tickAgoLabels, 1000);
 // Keep durations of running items ticking.
 setInterval(() => {
   if ([...S.items.values()].some((i) => i.status === "running")) {
