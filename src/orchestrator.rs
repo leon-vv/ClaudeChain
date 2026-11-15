@@ -27,20 +27,41 @@ pub enum UiEvent {
     Pipeline,
     /// Plan usage, the pause threshold, or the paused state changed.
     Limits { account: Value },
-    /// A different repository was opened (or none is open).
+    /// A repository was opened, so the list of open/recent ones changed.
     Workspace,
     RunEvent { item: String, run: u32, event: Value },
 }
 
+/// A `UiEvent` on the shared channel, with the id of the repository it
+/// belongs to. `None` is for everyone (account limits, the repo list).
+#[derive(Debug, Clone)]
+pub struct Envelope {
+    pub repo: Option<String>,
+    pub event: UiEvent,
+}
+
+impl Envelope {
+    pub fn global(event: UiEvent) -> Self {
+        Self { repo: None, event }
+    }
+
+    /// Whether a browser tab looking at repository `repo` wants this event.
+    pub fn is_for(&self, repo: Option<&str>) -> bool {
+        self.repo.is_none() || self.repo.as_deref() == repo
+    }
+}
+
 pub struct App {
+    /// Stable id of this repository + data directory (see `workspace::repo_id`).
+    pub id: String,
     pub layout: Layout,
     pub claude: String,
     pub pipeline: RwLock<Pipeline>,
     pub items: Mutex<BTreeMap<String, Item>>,
     running: Mutex<HashMap<String, RunControl>>,
-    pub events: broadcast::Sender<UiEvent>,
+    pub events: broadcast::Sender<Envelope>,
     wake: Notify,
-    /// Set when another repository is opened; the scheduler stops.
+    /// Set when the app is replaced (other main branch); the scheduler stops.
     closed: AtomicBool,
     pub account: Arc<Account>,
     /// Last reason the scheduler held runs back, to notice changes.
@@ -83,9 +104,10 @@ pub enum MessageMode {
 
 impl App {
     pub fn new(
+        id: String,
         layout: Layout,
         claude: String,
-        events: broadcast::Sender<UiEvent>,
+        events: broadcast::Sender<Envelope>,
         account: Arc<Account>,
     ) -> Result<Arc<Self>> {
         let pipeline = config::load_or_init(&layout.data)?;
@@ -123,6 +145,7 @@ impl App {
             }
         }
         Ok(Arc::new(Self {
+            id,
             layout,
             claude,
             pipeline: RwLock::new(pipeline),
@@ -141,7 +164,9 @@ impl App {
     }
 
     fn emit(&self, ev: UiEvent) {
-        let _ = self.events.send(ev);
+        // Account limits are shared by all repositories.
+        let repo = if matches!(ev, UiEvent::Limits { .. }) { None } else { Some(self.id.clone()) };
+        let _ = self.events.send(Envelope { repo, event: ev });
     }
 
     /// Applies `f` to an item, saves it and notifies the UI and scheduler.
@@ -513,8 +538,8 @@ impl App {
 
     // ---- Scheduling ------------------------------------------------------
 
-    /// Stops scheduling so another repository can be opened. Fails while
-    /// agents are running.
+    /// Stops scheduling so this app can be replaced (e.g. by one with another
+    /// main branch). Fails while agents are running.
     pub fn close(&self) -> Result<()> {
         let items = self.items.lock().unwrap();
         let running: Vec<_> = items.values().filter(|i| i.status == Status::Running).map(|i| i.id.as_str()).collect();
