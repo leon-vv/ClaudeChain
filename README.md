@@ -49,6 +49,26 @@ Options: `--repo <path>`, `--data <dir>`, `--port`, `--host`, `--claude <path>`.
 - **Resources**: plan usage and limits, an auto-pause threshold, token usage,
   and system load (Linux only).
 
+## MCP server
+
+ClaudeChain serves a basic [MCP](https://modelcontextprotocol.io) endpoint at
+`/mcp` (Streamable HTTP, JSON responses), so an agent can watch and drive the
+board. Add it to Claude Code with:
+
+```bash
+claude mcp add --transport http claudechain http://127.0.0.1:7878/mcp --header "X-ClaudeChain: 1"
+```
+
+The `X-ClaudeChain` header is required for every POST (see the cross-site
+protection in `src/web.rs`). Tools: `board` (text overview of all items per
+step: status, iteration, last run, PR), `list_items`, `list_steps`,
+`get_item`, `get_run_message`, `add_item`, `approve`, `move_item`, `retry`,
+`stop` and `send_message`.
+
+There is no authentication: anyone who can reach the server can run agents.
+To use it from another machine, prefer an SSH tunnel
+(`ssh -L 7878:127.0.0.1:7878 host`) over `--host 0.0.0.0`.
+
 ## How it works
 
 ```

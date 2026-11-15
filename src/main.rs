@@ -1,6 +1,7 @@
 mod account;
 mod config;
 mod git;
+mod mcp;
 mod orchestrator;
 mod runner;
 mod store;

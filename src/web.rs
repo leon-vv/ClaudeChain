@@ -79,6 +79,7 @@ pub fn router(ws: Ws, allowed_hosts: Vec<String>) -> Router {
         .route("/api/items/{id}/files", get(list_files))
         .route("/api/items/{id}/file", get(get_file))
         .route("/api/items/{id}/diff", get(get_diff))
+        .route("/mcp", post(crate::mcp::handle))
         .layer(middleware::from_fn(move |req, next| guard(allowed_hosts.clone(), req, next)))
         .with_state(ws)
 }
