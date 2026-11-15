@@ -57,6 +57,7 @@ pub fn router(ws: Ws, allowed_hosts: Vec<String>) -> Router {
         .route("/app.js", get(|| static_file("text/javascript", include_str!("../static/app.js"))))
         .route("/resources.js", get(|| static_file("text/javascript", include_str!("../static/resources.js"))))
         .route("/style.css", get(|| static_file("text/css", include_str!("../static/style.css"))))
+        .route("/favicon.svg", get(|| static_file("image/svg+xml", include_str!("../static/favicon.svg"))))
         .route("/api/state", get(state))
         .route("/api/events", get(events))
         .route("/api/workspace", post(open_workspace))
