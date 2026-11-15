@@ -67,10 +67,16 @@ claude mcp add --transport http claudechain http://127.0.0.1:7878/mcp --header "
 ```
 
 The `X-ClaudeChain` header is required for every POST (see the cross-site
-protection in `src/web.rs`). Tools: `board` (text overview of all items per
-step: status, iteration, last run, PR), `list_items`, `list_steps`,
-`get_item`, `get_run_message`, `add_item`, `approve`, `move_item`, `retry`,
-`stop` and `send_message`.
+protection in `src/web.rs`). Tools: `list_repos`, `board` (text overview of
+all items per step: status, iteration, last run, PR), `list_items`,
+`list_steps`, `get_item`, `get_run_message`, `add_item`, `approve`,
+`move_item`, `retry`, `stop` and `send_message`.
+
+Every tool takes an optional `repo` argument (a repository id from
+`list_repos`, its path or its directory name). Without it, `board` and
+`list_items` cover all open repositories, item tools find the repository that
+has the item, and `add_item`/`list_steps` work when exactly one repository is
+open.
 
 There is no authentication: anyone who can reach the server can run agents.
 To use it from another machine, prefer an SSH tunnel

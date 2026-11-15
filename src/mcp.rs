@@ -74,17 +74,29 @@ fn initialize(params: &Value) -> Value {
         "serverInfo": {"name": "claudechain", "version": env!("CARGO_PKG_VERSION")},
         "instructions": "ClaudeChain runs work items (GitHub issues) through a pipeline of Claude agents. \
             Use `board` for an overview, `get_item` for details, and the other tools to approve, move, retry, \
-            stop or message items.",
+            stop or message items. Several repositories can be open: `list_repos` lists them, and every tool \
+            takes an optional `repo` argument.",
     })
 }
 
-fn schema(props: Value, required: &[&str]) -> Value {
+/// Every tool takes an optional `repo`, since several repositories can be open.
+fn schema(mut props: Value, required: &[&str]) -> Value {
+    props["repo"] = json!({
+        "type": "string",
+        "description": "Repository: its id (see list_repos), path or directory name. Optional when it is \
+            unambiguous; board and list_items cover all open repositories without it.",
+    });
     json!({"type": "object", "properties": props, "required": required})
 }
 
 fn tools() -> Vec<Value> {
     let id = json!({"type": "string", "description": "Work item id, e.g. item-7"});
     vec![
+        json!({
+            "name": "list_repos",
+            "description": "The repositories open in ClaudeChain (id, path, main branch, item count).",
+            "inputSchema": {"type": "object", "properties": {}, "required": []},
+        }),
         json!({
             "name": "board",
             "description": "Text overview of the board: every work item grouped by pipeline step, with status, \
@@ -190,19 +202,119 @@ fn pretty(v: &Value) -> String {
     serde_json::to_string_pretty(v).unwrap_or_default()
 }
 
+fn repo_label(app: &App) -> String {
+    format!("{} (repo {})", app.layout.repo.display(), app.id)
+}
+
+fn open_list(ws: &Workspace) -> String {
+    let repos: Vec<String> = ws.apps().iter().map(|a| repo_label(a)).collect();
+    if repos.is_empty() { "none".into() } else { repos.join(", ") }
+}
+
+/// The open repository named by `arg`: its id (a recent repository with that
+/// id is reopened), its path, or its directory name.
+async fn find_repo(ws: &Workspace, arg: &str) -> Result<Arc<App>> {
+    if let Some(app) = ws.resolve(Some(arg)).await? {
+        return Ok(app);
+    }
+    let matches: Vec<Arc<App>> = ws
+        .apps()
+        .into_iter()
+        .filter(|a| {
+            a.layout.repo == std::path::Path::new(arg)
+                || a.layout.repo.file_name().is_some_and(|n| n.to_string_lossy() == arg)
+        })
+        .collect();
+    match matches.len() {
+        1 => Ok(matches.into_iter().next().unwrap()),
+        0 => bail!("no open repository '{arg}'; open: {}", open_list(ws)),
+        _ => bail!("'{arg}' matches several open repositories; use the repo id. Open: {}", open_list(ws)),
+    }
+}
+
+/// The repository given by the `repo` argument, or the only open one.
+async fn single_app(ws: &Workspace, args: &Value) -> Result<Arc<App>> {
+    if let Some(r) = args.get("repo").and_then(Value::as_str).filter(|r| !r.is_empty()) {
+        return find_repo(ws, r).await;
+    }
+    let mut apps = ws.apps();
+    match apps.len() {
+        0 => bail!("no repository is open in ClaudeChain"),
+        1 => Ok(apps.remove(0)),
+        _ => bail!("several repositories are open; pass 'repo' (see list_repos). Open: {}", open_list(ws)),
+    }
+}
+
+/// The repositories a listing covers: the `repo` argument, else all open ones.
+async fn listed_apps(ws: &Workspace, args: &Value) -> Result<Vec<Arc<App>>> {
+    if let Some(r) = args.get("repo").and_then(Value::as_str).filter(|r| !r.is_empty()) {
+        return Ok(vec![find_repo(ws, r).await?]);
+    }
+    let apps = ws.apps();
+    if apps.is_empty() {
+        bail!("no repository is open in ClaudeChain");
+    }
+    Ok(apps)
+}
+
+/// The repository holding work item `id`: the `repo` argument, else the one
+/// open repository that has an item with this id.
+async fn app_for_item(ws: &Workspace, args: &Value, id: &str) -> Result<Arc<App>> {
+    if args.get("repo").and_then(Value::as_str).is_some_and(|r| !r.is_empty()) {
+        return single_app(ws, args).await;
+    }
+    let mut apps: Vec<Arc<App>> =
+        ws.apps().into_iter().filter(|a| a.items.lock().unwrap().contains_key(id)).collect();
+    match apps.len() {
+        1 => Ok(apps.remove(0)),
+        0 => bail!("no item '{id}' in any open repository"),
+        _ => bail!("'{id}' exists in several open repositories; pass 'repo' (see list_repos)"),
+    }
+}
+
 async fn run_tool(ws: &Workspace, name: &str, args: &Value) -> Result<String> {
-    let app = ws.app().ok_or_else(|| anyhow!("no repository is open in ClaudeChain"))?;
+    let item_id = || str_arg(args, "id");
     match name {
+        "list_repos" => {
+            let default = ws.app(None).map(|a| a.id.clone());
+            let repos: Vec<Value> = ws
+                .apps()
+                .iter()
+                .map(|a| {
+                    json!({
+                        "id": a.id, "repo": a.layout.repo, "main": a.layout.main,
+                        "items": a.items.lock().unwrap().len(),
+                        "default": default.as_deref() == Some(a.id.as_str()),
+                    })
+                })
+                .collect();
+            Ok(pretty(&json!(repos)))
+        }
         "board" => {
-            let items: Vec<Item> = app.items.lock().unwrap().values().cloned().collect();
-            Ok(board_text(&app.pipeline(), &app.layout.repo.display().to_string(), &items, Utc::now()))
+            let boards: Vec<String> = listed_apps(ws, args)
+                .await?
+                .iter()
+                .map(|app| {
+                    let items: Vec<Item> = app.items.lock().unwrap().values().cloned().collect();
+                    board_text(&app.pipeline(), &repo_label(app), &items, Utc::now())
+                })
+                .collect();
+            Ok(boards.join("\n\n"))
         }
         "list_items" => {
-            let items: Vec<Value> = app.items.lock().unwrap().values().map(item_summary).collect();
+            let mut items = vec![];
+            for app in listed_apps(ws, args).await? {
+                for item in app.items.lock().unwrap().values() {
+                    let mut v = item_summary(item);
+                    v["repo"] = json!(app.id);
+                    items.push(v);
+                }
+            }
             Ok(pretty(&json!(items)))
         }
         "list_steps" => {
-            let steps: Vec<Value> = app
+            let steps: Vec<Value> = single_app(ws, args)
+                .await?
                 .pipeline()
                 .steps
                 .iter()
@@ -216,39 +328,45 @@ async fn run_tool(ws: &Workspace, name: &str, args: &Value) -> Result<String> {
                 .collect();
             Ok(pretty(&json!(steps)))
         }
-        "get_item" => get_item(&app, str_arg(args, "id")?),
+        "get_item" => {
+            let id = item_id()?;
+            get_item(&*app_for_item(ws, args, id).await?, id)
+        }
         "get_run_message" => {
-            let id = str_arg(args, "id")?;
+            let id = item_id()?;
             let n = opt_u32_arg(args, "run")?.ok_or_else(|| anyhow!("missing integer argument 'run'"))?;
+            let app = app_for_item(ws, args, id).await?;
             run_message(&app, id, n)?.ok_or_else(|| anyhow!("run {n} of {id} has no message (yet)"))
         }
         "add_item" => {
+            let app = single_app(ws, args).await?;
             let item = app.add_item(str_arg(args, "text")?).await?;
-            Ok(format!("Added {} \"{}\" at step {}.", item.id, item.title, item.step))
+            Ok(format!("Added {} \"{}\" at step {} in {}.", item.id, item.title, item.step, repo_label(&app)))
         }
         "approve" => {
-            let id = str_arg(args, "id")?;
-            app.approve(id)?;
+            let id = item_id()?;
+            app_for_item(ws, args, id).await?.approve(id)?;
             Ok(format!("Approved {id}."))
         }
         "move_item" => {
-            let id = str_arg(args, "id")?;
+            let id = item_id()?;
             let step = str_arg(args, "step")?;
-            app.move_item(id, step, opt_str_arg(args, "note"))?;
+            app_for_item(ws, args, id).await?.move_item(id, step, opt_str_arg(args, "note"))?;
             Ok(format!("Moved {id} to {step}."))
         }
         "retry" => {
-            let id = str_arg(args, "id")?;
-            app.retry(id)?;
+            let id = item_id()?;
+            app_for_item(ws, args, id).await?.retry(id)?;
             Ok(format!("Queued {id} to retry its current step."))
         }
         "stop" => {
-            let id = str_arg(args, "id")?;
-            app.stop(id)?;
+            let id = item_id()?;
+            app_for_item(ws, args, id).await?.stop(id)?;
             Ok(format!("Stopping {id}."))
         }
         "send_message" => {
-            let id = str_arg(args, "id")?;
+            let id = item_id()?;
+            let app = app_for_item(ws, args, id).await?;
             let text = str_arg(args, "text")?.to_string();
             let mode: MessageMode = match args.get("mode") {
                 None | Some(Value::Null) => MessageMode::Auto,
@@ -494,7 +612,9 @@ mod tests {
 
         let list = dispatch(&ws, json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).await.unwrap();
         let names: Vec<&str> = list["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert!(names.contains(&"board") && names.contains(&"approve"), "{names:?}");
+        assert!(names.contains(&"board") && names.contains(&"approve") && names.contains(&"list_repos"), "{names:?}");
+        let board = list["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "board").unwrap();
+        assert!(board["inputSchema"]["properties"]["repo"].is_object(), "{board}");
 
         let unknown = dispatch(&ws, json!({"jsonrpc": "2.0", "id": 3, "method": "nope"})).await.unwrap();
         assert_eq!(unknown["error"]["code"], -32601);
