@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 40">
+  <defs>
+    <polygon points="11.5,6 39.5,6 45.5,12 45.5,28 39.5,34 11.5,34 5.5,28 5.5,12" id="a"/>
+    <polygon points="40.5,6 68.5,6 74.5,12 74.5,28 68.5,34 40.5,34 34.5,28 34.5,12" id="b"/>
+    <clipPath id="top"><rect x="26" y="0" width="28" height="20"/></clipPath>
+    <clipPath id="bottom"><rect x="26" y="20" width="28" height="20"/></clipPath>
+    <!-- Left link passes over the right one at the top crossing... -->
+    <mask id="b-under" maskUnits="userSpaceOnUse" x="0" y="0" width="80" height="40">
+      <rect width="80" height="40" fill="#fff"/>
+      <use href="#a" fill="none" stroke="#000" stroke-width="13" clip-path="url(#top)"/>
+    </mask>
+    <!-- ...and under it at the bottom crossing. -->
+    <mask id="a-under" maskUnits="userSpaceOnUse" x="0" y="0" width="80" height="40">
+      <rect width="80" height="40" fill="#fff"/>
+      <use href="#b" fill="none" stroke="#000" stroke-width="13" clip-path="url(#bottom)"/>
+    </mask>
+  </defs>
+  <g fill="none" stroke-width="8">
+    <use href="#a" stroke="#e4e7eb" mask="url(#a-under)"/>
+    <use href="#b" stroke="#e4e7eb" mask="url(#b-under)"/>
+  </g>
+</svg>
