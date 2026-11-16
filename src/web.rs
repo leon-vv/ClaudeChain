@@ -63,6 +63,7 @@ pub fn router(ws: Ws, allowed_hosts: Vec<String>) -> Router {
         .route("/api/fs", get(list_dir))
         .route("/api/resources", get(resources))
         .route("/api/limits", put(put_limits))
+        .route("/api/pause", put(put_pause))
         .route("/api/pipeline", put(put_pipeline))
         .route("/api/settings", put(put_settings))
         .route("/api/steps/{step}", put(put_step))
@@ -198,6 +199,24 @@ async fn put_limits(State(ws): State<Ws>, Json(l): Json<LimitSettings>) -> ApiRe
     ws.account.set_pause_above(l.pause_above);
     let account = orchestrator::account_json(&ws.account);
     let _ = ws.events.send(orchestrator::UiEvent::Limits { account: account.clone() });
+    Ok(Json(account))
+}
+
+#[derive(Deserialize)]
+struct PauseSettings {
+    paused: bool,
+}
+
+/// Pauses or resumes picking up queued items. Also ends the hold that follows
+/// stopping an item, since the human has now decided how the queue goes on.
+async fn put_pause(State(ws): State<Ws>, Json(p): Json<PauseSettings>) -> ApiResult<Json<Value>> {
+    ws.account.set_manual_paused(p.paused);
+    ws.account.set_hold_for(None);
+    let account = orchestrator::account_json(&ws.account);
+    let _ = ws.events.send(orchestrator::UiEvent::Limits { account: account.clone() });
+    if let Some(app) = ws.app() {
+        app.wake();
+    }
     Ok(Json(account))
 }
 
@@ -388,6 +407,12 @@ async fn restart(Cur(app): Cur, Path(id): Path<String>) -> ApiResult<Json<Value>
 
 async fn stop(Cur(app): Cur, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     app.stop(&id)?;
+    // Keep other queued items from taking the free slot while the human deals
+    // with the stopped one; released through `PUT /api/pause`.
+    if !app.account.manual_paused() {
+        app.account.set_hold_for(Some(id));
+        app.emit_account();
+    }
     Ok(Json(json!({})))
 }
 

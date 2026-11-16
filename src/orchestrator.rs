@@ -63,6 +63,8 @@ pub fn account_json(account: &Account) -> Value {
         "limits": account.limits(),
         "pause_above": account.pause_above(),
         "paused": account.paused_reason(),
+        "manual_paused": account.manual_paused(),
+        "hold": account.hold_for(),
     })
 }
 
@@ -222,6 +224,11 @@ impl App {
                 self.update_item_live(&id, |i| i.disk = Some(bytes));
             }
         }
+    }
+
+    /// Makes the scheduler look at the queue now.
+    pub fn wake(&self) {
+        self.wake.notify_one();
     }
 
     pub fn emit_account(&self) {
@@ -569,11 +576,23 @@ impl App {
             *self.paused.lock().unwrap() = paused.clone();
             self.emit_account();
         }
+        // The human paused new runs from the toolbar.
+        let manual = self.account.manual_paused();
+        // The human stopped an item: only that one may start until they decide.
+        let mut hold = self.account.hold_for();
         let mut to_start = vec![];
         {
             let mut items = self.items.lock().unwrap();
             if self.closed.load(Ordering::SeqCst) {
                 return;
+            }
+            if let Some(h) = &hold
+                && !items.contains_key(h)
+            {
+                // The held item was removed (or belongs to another repository).
+                self.account.set_hold_for(None);
+                hold = None;
+                self.emit_account();
             }
             for step in &pipeline.steps {
                 let mut busy = items.values().filter(|i| i.status == Status::Running && i.step == step.id).count();
@@ -595,7 +614,8 @@ impl App {
                         }
                         _ => false,
                     };
-                    if item.status == Status::Queued && busy < step.max_workers && paused.is_none() {
+                    let held_back = manual || hold.as_ref().is_some_and(|h| *h != item.id);
+                    if item.status == Status::Queued && busy < step.max_workers && paused.is_none() && !held_back {
                         busy += 1;
                         let n = item.next_run_number();
                         item.runs.push(Run {
