@@ -235,14 +235,18 @@ function renderAgents() {
   const box = $("#res-agents");
   if (!box) return;
   const agents = R.sys?.agents || [];
-  const rows = agents.map(({ agent: a, usage: u }) => {
-    const item = S.items.get(a.item);
+  const rows = agents.map(({ agent: a, usage: u, data, pipeline }) => {
+    // Agents of other pipelines (or repositories) aren't on this board.
+    const own = !data || data === S.data;
+    const item = own ? S.items.get(a.item) : null;
     const run = item?.runs.find((r) => r.n === a.run);
     const t = run?.tokens;
     const ctx = t?.context && t?.context_window ? Math.round((t.context / t.context_window) * 100) : null;
     return [
-      h("a", { href: "#", onclick: (e) => { e.preventDefault(); showPage("board"); openInspector(a.item, a.run); } }, item?.title || a.item),
-      stepName(a.step),
+      own
+        ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); showPage("board"); openInspector(a.item, a.run); } }, item?.title || a.item)
+        : h("span", { title: data }, `[${pipeline}] ${a.title || a.item}`),
+      own ? stepName(a.step) : a.step,
       run ? shortModel(run.model) : "",
       run ? fmtSecs(runSecs(run)) : "",
       h("span", { title: tokTitle(t) }, t ? fmtTok(tokTotal(t)) : "–"),

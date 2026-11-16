@@ -54,7 +54,19 @@ Options: `--repo <path>`, `--data <dir>`, `--port`, `--host`, `--claude <path>`.
   prompts/             general.md plus one prompt per step
   items/<id>/          issue.md, item.json, messages/, runs/
   worktrees/<id>/      git worktree on branch claudechain/<id>
+  pipelines.json       this pipeline's name and the list of all pipelines
 ```
+
+A repository can have several pipelines. Each is its own data directory in the
+format above; the first one (`<repo>/.claudechain`) is called "Default". Use the
+dropdown next to the repository name to switch, add a pipeline (pick or type a
+new folder) or rename the current one. All pipelines of the open repository run
+at the same time, so switching never interrupts agents; the dropdown shows how
+many agents each one is running. Opening another repository stops its idle
+pipelines, while ones with running agents keep going in the background. Every pipeline's `pipelines.json` lists
+all of them, so whichever one is opened can fill the dropdown. Branches of
+pipelines other than Default include the folder name
+(`claudechain/<folder>-<id>`) so item ids don't collide.
 
 Each run starts `claude -p` in the item's worktree with the step's permission
 mode (default `dontAsk`) and only the step's tools, without loading your own

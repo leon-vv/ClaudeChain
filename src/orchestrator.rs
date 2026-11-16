@@ -32,15 +32,33 @@ pub enum UiEvent {
     RunEvent { item: String, run: u32, event: Value },
 }
 
+/// A `UiEvent` with the data directory of the pipeline it belongs to (none for
+/// events about the whole server, like limits or a workspace switch). Several
+/// pipelines run at once, so the browser ignores events of the ones it doesn't show.
+#[derive(Debug, Clone, Serialize)]
+pub struct Tagged {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<std::path::PathBuf>,
+    #[serde(flatten)]
+    pub event: UiEvent,
+}
+
+impl From<UiEvent> for Tagged {
+    fn from(event: UiEvent) -> Self {
+        Self { data_dir: None, event }
+    }
+}
+
 pub struct App {
     pub layout: Layout,
     pub claude: String,
     pub pipeline: RwLock<Pipeline>,
     pub items: Mutex<BTreeMap<String, Item>>,
     running: Mutex<HashMap<String, RunControl>>,
-    pub events: broadcast::Sender<UiEvent>,
+    pub events: broadcast::Sender<Tagged>,
     wake: Notify,
-    /// Set when another repository is opened; the scheduler stops.
+    /// Set when the pipeline is closed (another repository was opened while it
+    /// was idle); the scheduler stops.
     closed: AtomicBool,
     pub account: Arc<Account>,
     /// Last reason the scheduler held runs back, to notice changes.
@@ -82,7 +100,7 @@ impl App {
     pub fn new(
         layout: Layout,
         claude: String,
-        events: broadcast::Sender<UiEvent>,
+        events: broadcast::Sender<Tagged>,
         account: Arc<Account>,
     ) -> Result<Arc<Self>> {
         let pipeline = config::load_or_init(&layout.data)?;
@@ -138,7 +156,11 @@ impl App {
     }
 
     fn emit(&self, ev: UiEvent) {
-        let _ = self.events.send(ev);
+        let data_dir = match ev {
+            UiEvent::Limits { .. } | UiEvent::Workspace => None,
+            _ => Some(self.layout.data.clone()),
+        };
+        let _ = self.events.send(Tagged { data_dir, event: ev });
     }
 
     /// Applies `f` to an item, saves it and notifies the UI and scheduler.
@@ -245,8 +267,18 @@ impl App {
 
         let first = self.pipeline().steps[0].id.clone();
         let now = Utc::now();
+        // Pipelines other than the default one share the repository, so their
+        // branches get the data folder's name to keep item ids from colliding.
+        let branch = match self.layout.data.file_name().map(|n| n.to_string_lossy().to_string()) {
+            Some(dir) if self.layout.data != crate::workspace::default_data_dir(&self.layout.repo) => {
+                let dir: String = dir.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
+                let dir = dir.trim_matches('-');
+                if dir.is_empty() { format!("claudechain/{id}") } else { format!("claudechain/{dir}-{id}") }
+            }
+            _ => format!("claudechain/{id}"),
+        };
         let item = Item {
-            branch: format!("claudechain/{id}"),
+            branch,
             id: id.clone(),
             number,
             title,

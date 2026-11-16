@@ -60,6 +60,8 @@ pub fn router(ws: Ws, allowed_hosts: Vec<String>) -> Router {
         .route("/api/state", get(state))
         .route("/api/events", get(events))
         .route("/api/workspace", post(open_workspace))
+        .route("/api/pipelines", post(add_pipeline))
+        .route("/api/pipelines/rename", post(rename_pipeline))
         .route("/api/fs", get(list_dir))
         .route("/api/resources", get(resources))
         .route("/api/limits", put(put_limits))
@@ -122,6 +124,16 @@ async fn state(State(ws): State<Ws>) -> Json<Value> {
         obj.insert("steps".into(), steps);
     }
     let items: Vec<_> = app.items.lock().unwrap().values().cloned().collect();
+    let known = workspace::pipelines(&app.layout.repo, &app.layout.data);
+    let live = ws.apps();
+    let pipelines: Vec<Value> = known
+        .pipelines
+        .iter()
+        .map(|p| {
+            let running = live.iter().find(|a| a.layout.data == p.data).map_or(0, |a| a.agents().len());
+            json!({"name": p.name, "data": p.data, "missing": !p.data.is_dir(), "running": running})
+        })
+        .collect();
     Json(json!({
         "repo": app.layout.repo,
         "data": app.layout.data,
@@ -130,6 +142,8 @@ async fn state(State(ws): State<Ws>) -> Json<Value> {
         "home": workspace::home_dir(),
         "account": orchestrator::account_json(&ws.account),
         "pipeline": pipeline,
+        "pipeline_name": known.name,
+        "pipelines": pipelines,
         "items": items,
     }))
 }
@@ -158,6 +172,27 @@ async fn open_workspace(State(ws): State<Ws>, Json(o): Json<OpenWorkspace>) -> A
 }
 
 #[derive(Deserialize)]
+struct AddPipeline {
+    name: String,
+    data: String,
+}
+
+async fn add_pipeline(State(ws): State<Ws>, Json(p): Json<AddPipeline>) -> ApiResult<Json<Value>> {
+    ws.add_pipeline(&p.name, FsPath::new(p.data.trim())).await?;
+    Ok(Json(json!({})))
+}
+
+#[derive(Deserialize)]
+struct RenamePipeline {
+    name: String,
+}
+
+async fn rename_pipeline(State(ws): State<Ws>, Json(p): Json<RenamePipeline>) -> ApiResult<Json<Value>> {
+    ws.rename_pipeline(&p.name).await?;
+    Ok(Json(json!({})))
+}
+
+#[derive(Deserialize)]
 struct DirQuery {
     #[serde(default)]
     path: String,
@@ -169,18 +204,17 @@ async fn list_dir(Query(q): Query<DirQuery>) -> ApiResult<Json<Value>> {
     Ok(Json(json!(workspace::list_dir(&q.path, q.hidden)?)))
 }
 
-/// System load, history, and CPU/memory of each running agent's process tree.
+/// System load, history, and CPU/memory of each running agent's process tree,
+/// for every live pipeline (`data` and `pipeline` say which one).
 async fn resources(State(ws): State<Ws>) -> Json<Value> {
-    let agents: Vec<Value> = ws
-        .app()
-        .map(|app| app.agents())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|a| {
+    let mut agents: Vec<Value> = vec![];
+    for app in ws.apps() {
+        let name = workspace::pipelines(&app.layout.repo, &app.layout.data).name;
+        for a in app.agents() {
             let usage = ws.monitor.tree(a.pid);
-            json!({"agent": a, "usage": usage})
-        })
-        .collect();
+            agents.push(json!({"agent": a, "usage": usage, "data": app.layout.data, "pipeline": name}));
+        }
+    }
     Json(json!({
         "system": ws.monitor.latest(),
         "history": ws.monitor.history(),
@@ -197,7 +231,7 @@ struct LimitSettings {
 async fn put_limits(State(ws): State<Ws>, Json(l): Json<LimitSettings>) -> ApiResult<Json<Value>> {
     ws.account.set_pause_above(l.pause_above);
     let account = orchestrator::account_json(&ws.account);
-    let _ = ws.events.send(orchestrator::UiEvent::Limits { account: account.clone() });
+    ws.emit(orchestrator::UiEvent::Limits { account: account.clone() });
     Ok(Json(account))
 }
 

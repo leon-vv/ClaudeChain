@@ -98,6 +98,7 @@ textarea { width: 100%; resize: vertical; font-family: var(--mono); font-size: 1
 .brand h1 { font-size: 18px; margin: 0; }
 .repo { color: var(--muted); font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60vw; border-color: transparent; background: none; }
 .repo:hover { color: var(--accent); }
+.pipeline-select { width: auto; max-width: 220px; font-size: 12.5px; padding: 3px 6px; }
 .actions { display: flex; gap: 8px; align-items: center; }
 .conn {
   display: inline-flex; align-items: center; gap: 5px;
