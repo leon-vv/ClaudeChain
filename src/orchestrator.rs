@@ -27,20 +27,41 @@ pub enum UiEvent {
     Pipeline,
     /// Plan usage, the pause threshold, or the paused state changed.
     Limits { account: Value },
-    /// A different repository was opened (or none is open).
+    /// A repository was opened, so the list of open/recent ones changed.
     Workspace,
     RunEvent { item: String, run: u32, event: Value },
 }
 
+/// A `UiEvent` on the shared channel, with the id of the repository it
+/// belongs to. `None` is for everyone (account limits, the repo list).
+#[derive(Debug, Clone)]
+pub struct Envelope {
+    pub repo: Option<String>,
+    pub event: UiEvent,
+}
+
+impl Envelope {
+    pub fn global(event: UiEvent) -> Self {
+        Self { repo: None, event }
+    }
+
+    /// Whether a browser tab looking at repository `repo` wants this event.
+    pub fn is_for(&self, repo: Option<&str>) -> bool {
+        self.repo.is_none() || self.repo.as_deref() == repo
+    }
+}
+
 pub struct App {
+    /// Stable id of this repository + data directory (see `workspace::repo_id`).
+    pub id: String,
     pub layout: Layout,
     pub claude: String,
     pub pipeline: RwLock<Pipeline>,
     pub items: Mutex<BTreeMap<String, Item>>,
     running: Mutex<HashMap<String, RunControl>>,
-    pub events: broadcast::Sender<UiEvent>,
+    pub events: broadcast::Sender<Envelope>,
     wake: Notify,
-    /// Set when another repository is opened; the scheduler stops.
+    /// Set when the app is replaced (other main branch); the scheduler stops.
     closed: AtomicBool,
     pub account: Arc<Account>,
     /// Last reason the scheduler held runs back, to notice changes.
@@ -85,9 +106,10 @@ pub enum MessageMode {
 
 impl App {
     pub fn new(
+        id: String,
         layout: Layout,
         claude: String,
-        events: broadcast::Sender<UiEvent>,
+        events: broadcast::Sender<Envelope>,
         account: Arc<Account>,
     ) -> Result<Arc<Self>> {
         let pipeline = config::load_or_init(&layout.data)?;
@@ -125,6 +147,7 @@ impl App {
             }
         }
         Ok(Arc::new(Self {
+            id,
             layout,
             claude,
             pipeline: RwLock::new(pipeline),
@@ -143,7 +166,9 @@ impl App {
     }
 
     fn emit(&self, ev: UiEvent) {
-        let _ = self.events.send(ev);
+        // Account limits are shared by all repositories.
+        let repo = if matches!(ev, UiEvent::Limits { .. }) { None } else { Some(self.id.clone()) };
+        let _ = self.events.send(Envelope { repo, event: ev });
     }
 
     /// Applies `f` to an item, saves it and notifies the UI and scheduler.
@@ -226,7 +251,7 @@ impl App {
         }
     }
 
-    /// Makes the scheduler look at the queue now.
+    /// Makes the scheduler look for work now instead of at its next tick.
     pub fn wake(&self) {
         self.wake.notify_one();
     }
@@ -276,8 +301,18 @@ impl App {
 
         let first = self.pipeline().steps[0].id.clone();
         let now = Utc::now();
+        // Pipelines other than the default one share the repository, so their
+        // branches get the data folder's name to keep item ids from colliding.
+        let branch = match self.layout.data.file_name().map(|n| n.to_string_lossy().to_string()) {
+            Some(dir) if self.layout.data != crate::workspace::default_data_dir(&self.layout.repo) => {
+                let dir: String = dir.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
+                let dir = dir.trim_matches('-');
+                if dir.is_empty() { format!("claudechain/{id}") } else { format!("claudechain/{dir}-{id}") }
+            }
+            _ => format!("claudechain/{id}"),
+        };
         let item = Item {
-            branch: format!("claudechain/{id}"),
+            branch,
             id: id.clone(),
             number,
             title,
@@ -357,7 +392,7 @@ impl App {
 
     /// Restarts an item from scratch: stops its agent, deletes its runs and
     /// messages (only `issue.md` is kept), removes its worktree and local
-    /// branch (both are re-created from the repo's HEAD on the next run; a
+    /// branch (both are re-created from the main branch on the next run; a
     /// pushed branch or PR on GitHub is left alone) and queues it at the
     /// first step.
     pub async fn restart_item(&self, id: &str) -> Result<()> {
@@ -515,8 +550,8 @@ impl App {
 
     // ---- Scheduling ------------------------------------------------------
 
-    /// Stops scheduling so another repository can be opened. Fails while
-    /// agents are running.
+    /// Stops scheduling so this app can be replaced (e.g. by one with another
+    /// main branch). Fails while agents are running.
     pub fn close(&self) -> Result<()> {
         let items = self.items.lock().unwrap();
         let running: Vec<_> = items.values().filter(|i| i.status == Status::Running).map(|i| i.id.as_str()).collect();
@@ -673,7 +708,7 @@ impl App {
         let step = pipeline.step(&run.step).cloned().ok_or_else(|| anyhow!("unknown step {}", run.step))?;
 
         let worktree = self.layout.worktree(id);
-        let head = git::ensure_worktree(&self.layout.repo, &worktree, &item.branch)
+        let head = git::ensure_worktree(&self.layout.repo, &worktree, &item.branch, &self.layout.main)
             .await
             .context("creating git worktree")?;
         if item.base_commit.is_none() {
@@ -984,7 +1019,7 @@ fn initial_prompt(layout: &Layout, pipeline: &Pipeline, item: &Item, step: &Step
         "# Work item {id}: {title}\n\n\
          - Issue: {issue}\n\
          - Step: {step_name} (`{step_id}`), run {n}, iteration {iter} of max {max}\n\
-         - Working directory: `{wt}` (git worktree, branch `{branch}`)\n\
+         - Working directory: `{wt}` (git worktree, branch `{branch}`, created from `{main}`)\n\
          - Work item folder: `{dir}`\n\
          - Issue text: `{dir}/issue.md`\n\n\
          ## Earlier messages (oldest first, in the work item folder)\n\n{messages}\n\n\
@@ -1000,6 +1035,7 @@ fn initial_prompt(layout: &Layout, pipeline: &Pipeline, item: &Item, step: &Step
         max = pipeline.max_iterations,
         wt = layout.worktree(&item.id).display(),
         branch = item.branch,
+        main = layout.main,
         dir = dir.display(),
         history = if history.is_empty() { "(this is the first run)".into() } else { history },
         notes = notes_section(notes),
@@ -1033,7 +1069,7 @@ mod tests {
     fn setup(name: &str) -> (Layout, Pipeline, Item) {
         let root = std::env::temp_dir().join(format!("claudechain-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let layout = Layout { repo: root.clone(), data: root.join("data") };
+        let layout = Layout { repo: root.clone(), data: root.join("data"), main: "main".into() };
         let pipeline = config::load_or_init(&layout.data).unwrap();
         let now = Utc::now();
         let item = Item {

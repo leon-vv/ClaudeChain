@@ -24,6 +24,32 @@ pub async fn check_repo(repo: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether `name` is a local branch in `repo`.
+pub async fn branch_exists(repo: &Path, name: &str) -> Result<bool> {
+    let branch_ref = format!("refs/heads/{name}");
+    let out = git(repo).args(["rev-parse", "--verify", "--quiet", &branch_ref]).output().await?;
+    Ok(out.status.success())
+}
+
+/// Guesses the repository's main branch: the branch `origin/HEAD` points to,
+/// else `main` or `master`, else whatever is checked out.
+pub async fn default_branch(repo: &Path) -> Result<String> {
+    if let Ok(r) = output(git(repo).args(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])).await
+        && let Some(name) = r.strip_prefix("origin/")
+        && branch_exists(repo, name).await?
+    {
+        return Ok(name.to_string());
+    }
+    for name in ["main", "master"] {
+        if branch_exists(repo, name).await? {
+            return Ok(name.to_string());
+        }
+    }
+    output(git(repo).args(["symbolic-ref", "--quiet", "--short", "HEAD"]))
+        .await
+        .map_err(|_| anyhow::anyhow!("could not determine the main branch; enter it explicitly"))
+}
+
 /// Keeps the data directory out of `git status` in the target repo.
 pub async fn exclude_path(repo: &Path, data: &Path) -> Result<()> {
     let Ok(rel) = data.strip_prefix(repo) else { return Ok(()) };
@@ -41,18 +67,21 @@ pub async fn exclude_path(repo: &Path, data: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Creates the item's worktree on `branch` if it doesn't exist yet.
-/// Returns the worktree's current HEAD (its base commit when just created).
-pub async fn ensure_worktree(repo: &Path, path: &Path, branch: &str) -> Result<String> {
+/// Creates the item's worktree on `branch` if it doesn't exist yet; a new
+/// branch starts from the local branch `main` (not whatever the main checkout
+/// has checked out). Returns the worktree's current HEAD (its base commit when
+/// just created).
+pub async fn ensure_worktree(repo: &Path, path: &Path, branch: &str, main: &str) -> Result<String> {
     if !path.join(".git").exists() {
-        let branch_ref = format!("refs/heads/{branch}");
-        let exists = git(repo).args(["rev-parse", "--verify", "--quiet", &branch_ref]).output().await?;
         let mut cmd = git(repo);
         cmd.args(["worktree", "add"]);
-        if exists.status.success() {
+        if branch_exists(repo, branch).await? {
             cmd.arg(path).arg(branch);
         } else {
-            cmd.arg("-b").arg(branch).arg(path).arg("HEAD");
+            if !branch_exists(repo, main).await? {
+                bail!("main branch '{main}' does not exist");
+            }
+            cmd.arg("-b").arg(branch).arg(path).arg(format!("refs/heads/{main}"));
         }
         output(&mut cmd).await?;
     }
@@ -68,9 +97,7 @@ pub async fn remove_worktree(repo: &Path, path: &Path) -> Result<()> {
 
 /// Deletes a local branch if it exists (the remote branch is left alone).
 pub async fn delete_branch(repo: &Path, branch: &str) -> Result<()> {
-    let branch_ref = format!("refs/heads/{branch}");
-    let exists = git(repo).args(["rev-parse", "--verify", "--quiet", &branch_ref]).output().await?;
-    if exists.status.success() {
+    if branch_exists(repo, branch).await? {
         output(git(repo).args(["branch", "-D", branch])).await?;
     }
     Ok(())
@@ -130,4 +157,36 @@ pub async fn fetch_issue(repo: &Path, issue: &str) -> Result<Issue> {
     )
     .await?;
     Ok(serde_json::from_str(&json)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn run(dir: &Path, args: &[&str]) {
+        output(git(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn worktree_starts_from_main_not_head() {
+        let root = std::env::temp_dir().join(format!("claudechain-git-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run(&repo, &["init", "-q", "-b", "trunk"]).await;
+        run(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]).await;
+        let trunk = output(git(&repo).args(["rev-parse", "HEAD"])).await.unwrap();
+        // The main checkout is on another branch, ahead of trunk.
+        run(&repo, &["checkout", "-q", "-b", "feature"]).await;
+        run(&repo, &["commit", "-q", "--allow-empty", "-m", "feature"]).await;
+
+        assert_eq!(default_branch(&repo).await.unwrap(), "feature");
+        assert!(branch_exists(&repo, "trunk").await.unwrap());
+        assert!(!branch_exists(&repo, "main").await.unwrap());
+
+        let wt = root.join("wt");
+        assert!(ensure_worktree(&repo, &wt, "item", "main").await.is_err());
+        assert_eq!(ensure_worktree(&repo, &wt, "item", "trunk").await.unwrap(), trunk);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

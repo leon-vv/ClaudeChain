@@ -286,6 +286,8 @@ impl Item {
 pub struct Layout {
     pub repo: PathBuf,
     pub data: PathBuf,
+    /// Branch new worktrees are created from.
+    pub main: String,
 }
 
 impl Layout {

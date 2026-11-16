@@ -28,6 +28,13 @@ and items are stored in `<repo>/.claudechain`, which is added to
 `.git/info/exclude`. Recent repositories are remembered in
 `~/.config/claudechain/state.json`.
 
+Several repositories can be open at once, one per browser tab. The tab's
+repository is in its URL (`?repo=<id>`), so tabs survive a reload and can be
+bookmarked. Opening a repository switches only the current tab. Repositories
+that no tab shows keep running their agents until the server stops. They all
+share one Claude account, so its plan limits and pause threshold apply to the
+agents of all open repositories together.
+
 Options: `--repo <path>`, `--data <dir>`, `--port`, `--host`, `--claude <path>`.
 
 ## Using it
@@ -49,6 +56,32 @@ Options: `--repo <path>`, `--data <dir>`, `--port`, `--host`, `--claude <path>`.
 - **Resources**: plan usage and limits, an auto-pause threshold, token usage,
   and system load (Linux only).
 
+## MCP server
+
+ClaudeChain serves a basic [MCP](https://modelcontextprotocol.io) endpoint at
+`/mcp` (Streamable HTTP, JSON responses), so an agent can watch and drive the
+board. Add it to Claude Code with:
+
+```bash
+claude mcp add --transport http claudechain http://127.0.0.1:7878/mcp --header "X-ClaudeChain: 1"
+```
+
+The `X-ClaudeChain` header is required for every POST (see the cross-site
+protection in `src/web.rs`). Tools: `list_repos`, `board` (text overview of
+all items per step: status, iteration, last run, PR), `list_items`,
+`list_steps`, `get_item`, `get_run_message`, `add_item`, `approve`,
+`move_item`, `retry`, `stop` and `send_message`.
+
+Every tool takes an optional `repo` argument (a repository id from
+`list_repos`, its path or its directory name). Without it, `board` and
+`list_items` cover all open repositories, item tools find the repository that
+has the item, and `add_item`/`list_steps` work when exactly one repository is
+open.
+
+There is no authentication: anyone who can reach the server can run agents.
+To use it from another machine, prefer an SSH tunnel
+(`ssh -L 7878:127.0.0.1:7878 host`) over `--host 0.0.0.0`.
+
 ## How it works
 
 ```
@@ -57,7 +90,19 @@ Options: `--repo <path>`, `--data <dir>`, `--port`, `--host`, `--claude <path>`.
   prompts/             general.md plus one prompt per step
   items/<id>/          issue.md, item.json, messages/, runs/
   worktrees/<id>/      git worktree on branch claudechain/<id>
+  pipelines.json       this pipeline's name and the list of all pipelines
 ```
+
+A repository can have several pipelines. Each is its own data directory in the
+format above; the first one (`<repo>/.claudechain`) is called "Default". Use the
+dropdown next to the repository name to switch, add a pipeline (pick or type a
+new folder) or rename the current one. All pipelines of the open repository run
+at the same time, so switching never interrupts agents; the dropdown shows how
+many agents each one is running. Each pipeline has its own browser URL
+(`?repo=<id>`), so different tabs can show different pipelines. Every pipeline's
+`pipelines.json` lists all of them, so whichever one is opened can fill the dropdown. Branches of
+pipelines other than Default include the folder name
+(`claudechain/<folder>-<id>`) so item ids don't collide.
 
 Each run starts `claude -p` in the item's worktree with the step's permission
 mode (default `dontAsk`) and only the step's tools, without loading your own

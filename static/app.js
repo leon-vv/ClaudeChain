@@ -3,12 +3,18 @@
 // ---- State ---------------------------------------------------------------
 
 const S = {
+  // Id of the repository this tab looks at. It lives in the page URL
+  // (?repo=<id>), not in localStorage, so each tab can show another one.
+  repoId: new URLSearchParams(location.search).get("repo"),
+  es: null, // EventSource for repoId
   repo: null,
   data: null,
   defaultData: null,
   recent: [],
   home: "",
   pipeline: null,
+  pipelineName: null,
+  pipelines: [], // [{ name, data, missing }] from <data>/pipelines.json
   items: new Map(),
   insp: null, // { id, run, tab, data, file }
   account: null, // { limits, pause_above, paused, manual_paused, hold }
@@ -36,6 +42,8 @@ function h(tag, attrs = {}, ...children) {
 }
 
 async function api(method, path, body) {
+  // Every request is about this tab's repository (see web::RepoQuery).
+  if (S.repoId) path += `${path.includes("?") ? "&" : "?"}repo=${encodeURIComponent(S.repoId)}`;
   const res = await fetch(path, {
     method,
     // The server rejects changes without this header (see web::guard).
@@ -186,6 +194,39 @@ function fmtDuration(run) {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
 }
 
+/// "just now", "45s ago", "10m ago", "3h ago", "yesterday", "3 days ago", … "2 years ago".
+function fmtAgo(iso) {
+  const s = Math.max(0, Math.floor((Date.now() - new Date(iso)) / 1000));
+  if (s < 10) return "just now";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const hr = Math.floor(m / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const d = Math.floor(hr / 24);
+  const plural = (n, unit) => `${n} ${unit}${n === 1 ? "" : "s"} ago`;
+  if (d === 1) return "yesterday";
+  if (d < 7) return plural(d, "day");
+  if (d < 30) return plural(Math.floor(d / 7), "week");
+  if (d < 365) return plural(Math.max(1, Math.floor(d / 30)), "month");
+  return plural(Math.floor(d / 365), "year");
+}
+
+/// Elapsed time since `iso` as a clock: "3:23", or "1:03:23" past an hour.
+function fmtClock(iso) {
+  const s = Math.max(0, Math.floor((Date.now() - new Date(iso)) / 1000));
+  const ss = String(s % 60).padStart(2, "0");
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m}:${ss}` : `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}:${ss}`;
+}
+
+/// Refresh the text of every time label on the board without re-rendering it.
+function tickAgoLabels() {
+  for (const el of document.querySelectorAll(".cell .ago")) {
+    el.textContent = el.dataset.end ? fmtAgo(el.dataset.end) : fmtClock(el.dataset.start);
+  }
+}
+
 const STATUS_LABEL = {
   queued: "⏳ queued",
   awaiting_approval: "⏸ awaiting approval",
@@ -198,18 +239,25 @@ const STATUS_LABEL = {
 
 async function load() {
   const st = await api("GET", "/api/state");
+  // A tab without a repository in its URL gets the default one; pin it so
+  // opening another repository elsewhere doesn't change this tab.
+  if (st.id && st.id !== S.repoId) setRepoId(st.id);
   S.repo = st.repo;
   S.data = st.data ?? null;
   S.defaultData = st.default_data ?? null;
+  S.main = st.main ?? null;
   S.recent = st.recent || [];
   S.home = st.home;
   S.pipeline = st.pipeline ?? null;
+  S.pipelineName = st.pipeline_name ?? null;
+  S.pipelines = st.pipelines || [];
   S.account = st.account ?? null;
+  renderPipelineSelect();
   renderPlan();
   S.items = new Map((st.items || []).map((i) => [i.id, i]));
   // The folder name keeps the header on one line; the tooltip has the full path.
   $("#repo-path").textContent = st.repo ? st.repo.replace(/\/+$/, "").split("/").pop() : "no repository";
-  $("#repo").title = st.repo ? `Repository ${st.repo}\nData ${st.data}\n\nClick to open another repository` : "Open a repository";
+  $("#repo").title = st.repo ? `Repository ${st.repo}\nData ${st.data}\nMain branch ${st.main}\n\nClick to open another repository` : "Open a repository";
   $("#btn-add").disabled = !st.repo;
   $("#no-repo").hidden = !!st.repo;
   // Without a repository the page is a landing page: no top bar, just a card for opening one.
@@ -233,13 +281,12 @@ function renderLanding() {
     const data = r.data === `${r.repo.replace(/\/+$/, "")}/.claudechain` ? null : r.data;
     return h("li", {},
       h("button", {
-        title: `Open ${r.repo}\nData ${r.data}`,
+        title: `Open ${r.repo}\nData ${r.data}${r.main ? `\nMain branch ${r.main}` : ""}`,
         onclick: async (e) => {
           const btn = e.currentTarget;
           btn.disabled = true;
           try {
-            await api("POST", "/api/workspace", { repo: r.repo, data });
-            await load();
+            await openRepo({ repo: r.repo, data, main: r.main || null });
           } catch (err) {
             toast(err.message);
           } finally {
@@ -252,8 +299,31 @@ function renderLanding() {
   }));
 }
 
+/// Points this tab at repository `id`: the URL, the event stream and later API calls.
+function setRepoId(id) {
+  S.repoId = id;
+  const params = new URLSearchParams(location.search);
+  params.set("repo", id);
+  history.replaceState(null, "", `${location.pathname}?${params}${location.hash}`);
+  if (S.es?.repoId !== id) connect();
+}
+
+/// Opens a repository on the server and switches this tab to it. Other tabs
+/// keep showing theirs.
+async function openRepo(body) {
+  const { id } = await api("POST", "/api/workspace", body);
+  if (id !== S.repoId) {
+    closeInspector();
+    setRepoId(id);
+  }
+  await load();
+}
+
 function connect() {
-  const es = new EventSource("/api/events");
+  S.es?.close();
+  const es = new EventSource(S.repoId ? `/api/events?repo=${encodeURIComponent(S.repoId)}` : "/api/events");
+  es.repoId = S.repoId;
+  S.es = es;
   es.onopen = () => {
     $("#conn").classList.add("on");
     load();
@@ -278,7 +348,8 @@ function connect() {
         if (S.page === "resources") renderResources();
         break;
       case "workspace":
-        closeInspector();
+        // Some tab opened a repository; this tab keeps its own, but the
+        // recent list may have changed.
         load();
         break;
       case "pipeline":
@@ -451,6 +522,16 @@ function stepCell(it, s) {
     class: `cell${current ? " current" : ""}`,
     onclick: () => openInspector(it.id, runs.length ? runs[runs.length - 1].n : null),
   });
+  // Top-right time label: live clock while this step's run is going, else how long ago it finished.
+  const lastRun = runs[runs.length - 1];
+  if (lastRun) {
+    const live = current && it.status === "running" && !lastRun.ended && lastRun === it.runs[it.runs.length - 1];
+    if (live) {
+      td.append(h("span", { class: "ago running", "data-start": lastRun.started, title: `Running since ${new Date(lastRun.started).toLocaleString()}` }, fmtClock(lastRun.started)));
+    } else if (lastRun.ended) {
+      td.append(h("span", { class: "ago", "data-end": lastRun.ended, title: `Finished ${new Date(lastRun.ended).toLocaleString()}` }, fmtAgo(lastRun.ended)));
+    }
+  }
   if (runs.length) {
     td.append(h("div", { class: "chips" }, runs.map((r) =>
       h("span", {
@@ -935,8 +1016,16 @@ function folderBrowser(onSelect) {
 function workspaceDialog() {
   const repo = h("input", { type: "text", value: S.repo ?? "", placeholder: "/path/to/your/repository" });
   const data = h("input", { type: "text", value: S.data && S.data !== S.defaultData ? S.data : "" });
+  const main = h("input", { type: "text", value: S.main ?? "", placeholder: "default: remembered, else the remote's default branch" });
   const updatePlaceholder = () => (data.placeholder = repo.value.trim() ? `default: ${repo.value.trim().replace(/\/$/, "")}/.claudechain` : "default: <repository>/.claudechain");
-  repo.oninput = updatePlaceholder;
+  // A different repository gets its own remembered main branch (or the default).
+  const sameRepo = (a, b) => a.replace(/\/+$/, "") === b.replace(/\/+$/, "");
+  const repoChanged = () => {
+    updatePlaceholder();
+    const r = repo.value.trim();
+    main.value = (r && sameRepo(r, S.repo ?? "") ? S.main : S.recent.find((x) => sameRepo(x.repo, r))?.main) ?? "";
+  };
+  repo.oninput = repoChanged;
   updatePlaceholder();
   // Clicking a folder fills the most recently focused input (Repository by default).
   let target = repo;
@@ -950,21 +1039,115 @@ function workspaceDialog() {
   setTarget(repo);
   const browser = folderBrowser((path) => {
     target.value = path;
-    updatePlaceholder();
+    if (target === repo) repoChanged();
+    else updatePlaceholder();
   });
   const recent = S.recent.length
     ? h("div", {}, h("label", {}, "Recent"), h("div", { class: "recent" }, S.recent.map((r) =>
-        h("button", { onclick: () => { repo.value = r.repo; data.value = r.data === `${r.repo}/.claudechain` ? "" : r.data; updatePlaceholder(); } },
-          r.repo, h("small", {}, `data: ${r.data}`)))))
+        h("button", { onclick: () => { repo.value = r.repo; data.value = r.data === `${r.repo}/.claudechain` ? "" : r.data; main.value = r.main || ""; updatePlaceholder(); } },
+          r.repo, h("small", {}, `data: ${r.data}${r.main ? ` · main branch: ${r.main}` : ""}`)))))
     : "";
   dialog("Open repository", [
-    h("p", { class: "help" }, "ClaudeChain works on one git repository at a time. Its pipeline, prompts, work items and worktrees are kept in the data directory, so each repository keeps its own setup. Switching is only possible while no agents are running."),
+    h("p", { class: "help" }, "This tab switches to the repository you open. Repositories opened earlier stay open and keep running their agents; open another browser tab to look at several at the same time. The pipeline, prompts, work items and worktrees are kept in the data directory, so each repository keeps its own setup."),
     recent,
     browser.el,
     h("label", {}, "Repository"), h("div", { class: "field" }, repo),
     h("label", {}, "Data directory (optional)"), h("div", { class: "field" }, data),
-  ], () => api("POST", "/api/workspace", { repo: repo.value, data: data.value || null }), "Open", true);
+    h("label", { title: "New work items get their worktree branch from this local branch." }, "Main branch (optional)"), h("div", { class: "field" }, main),
+  ], () => openRepo({ repo: repo.value, data: data.value || null, main: main.value.trim() || null }), "Open", true);
   browser.go(S.repo ? S.repo.replace(/\/[^/]+\/?$/, "") || "/" : "");
+}
+
+// Pipelines ----------------------------------------------------------------
+// Each pipeline is a data directory of the same repository; <data>/pipelines.json
+// names it and lists the others, which fills this dropdown.
+
+const PIPE_NEW = ":new", PIPE_RENAME = ":rename"; // data paths are absolute, so these never clash
+
+function renderPipelineSelect() {
+  const sel = $("#pipeline-select");
+  sel.hidden = !S.repo;
+  if (!S.repo) return sel.replaceChildren();
+  sel.replaceChildren(
+    ...S.pipelines.map((p) => h("option", { value: p.id, selected: p.id === S.repoId, title: p.data },
+      p.name, p.missing ? " (missing)" : "", p.running ? ` · ${p.running} running` : "")),
+    h("option", { disabled: true }, "──────────"),
+    h("option", { value: PIPE_NEW }, "+ New pipeline…"),
+    h("option", { value: PIPE_RENAME }, "✎ Rename current…"),
+  );
+  sel.value = S.repoId;
+  sel.title = `Pipeline "${S.pipelineName ?? ""}"\nData ${S.data}`;
+}
+
+/// Refreshes only the pipeline list (running counts), at most once a second.
+function schedulePipelineRefresh() {
+  if (schedulePipelineRefresh.timer) return;
+  schedulePipelineRefresh.timer = setTimeout(async () => {
+    schedulePipelineRefresh.timer = null;
+    try {
+      const st = await api("GET", "/api/state");
+      if (st.id !== S.repoId) return;
+      S.pipelines = st.pipelines || [];
+      renderPipelineSelect();
+    } catch {}
+  }, 1000);
+}
+
+async function onPipelineSelect(e) {
+  const v = e.target.value;
+  e.target.value = S.repoId; // the selection follows the open pipeline, not the click
+  if (v === PIPE_NEW) return addPipelineDialog();
+  if (v === PIPE_RENAME) return renamePipelineDialog();
+  if (!v || v === S.repoId) return;
+  await act(async () => {
+    // Pipelines of the repository are open apps of their own; move this tab to it.
+    closeInspector();
+    setRepoId(v);
+    await load();
+  });
+}
+
+function addPipelineDialog() {
+  const name = h("input", { type: "text", placeholder: "e.g. Docs" });
+  const data = h("input", { type: "text" });
+  const repo = S.repo.replace(/\/+$/, "");
+  // Suggest <repo>/.claudechain-<name> until a folder is typed or picked.
+  let auto = true;
+  const suggest = () => {
+    const s = name.value.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    if (auto) data.value = s ? `${repo}/.claudechain-${s}` : "";
+  };
+  name.oninput = suggest;
+  data.oninput = () => (auto = !data.value);
+  const browser = folderBrowser((path) => {
+    auto = false;
+    data.value = path;
+  });
+  dialog("New pipeline", [
+    h("p", { class: "help" }, "A pipeline has its own steps, prompts, work items and worktrees, kept in its own folder (a new folder gets the default pipeline). It works on the same repository. All pipelines run at the same time; switching only changes which one you see, so running agents are not interrupted."),
+    h("label", {}, "Name"), h("div", { class: "field" }, name),
+    browser.el,
+    h("label", {}, "Folder"), h("div", { class: "field" }, data),
+  ], async () => {
+    const { id } = await api("POST", "/api/pipelines", { name: name.value, data: data.value });
+    closeInspector();
+    setRepoId(id);
+    await load();
+  }, "Create", true);
+  browser.go(S.repo);
+  setTimeout(() => name.focus(), 0);
+}
+
+function renamePipelineDialog() {
+  const name = h("input", { type: "text", value: S.pipelineName ?? "" });
+  dialog("Rename pipeline", [
+    h("p", { class: "help" }, `Only the name changes; the pipeline stays in ${S.data}.`),
+    h("label", {}, "Name"), h("div", { class: "field" }, name),
+  ], async () => {
+    await api("POST", "/api/pipelines/rename", { name: name.value });
+    await load();
+  }, "Rename");
+  setTimeout(() => { name.focus(); name.select(); }, 0);
 }
 
 // Pipeline editor ----------------------------------------------------------
@@ -1198,7 +1381,7 @@ function showPage(page) {
   $("#resources-page").hidden = page !== "resources";
   for (const b of document.querySelectorAll("#pages button")) b.classList.toggle("active", b.dataset.page === page);
   if (page !== "board") closeInspectorByUser();
-  if (location.hash !== (page === "board" ? "" : `#${page}`)) history.replaceState(null, "", page === "board" ? location.pathname : `#${page}`);
+  if (location.hash !== (page === "board" ? "" : `#${page}`)) history.replaceState(null, "", `${location.pathname}${location.search}${page === "board" ? "" : `#${page}`}`);
   if (page === "resources") startResources();
   else stopResources();
 }
@@ -1208,6 +1391,7 @@ window.addEventListener("hashchange", () => showPage(location.hash === "#resourc
 
 $("#btn-add").onclick = addDialog;
 $("#repo").onclick = workspaceDialog;
+$("#pipeline-select").onchange = onPipelineSelect;
 $("#btn-open-repo").onclick = workspaceDialog;
 $("#dialog-cancel").onclick = () => $("#dialog").close();
 $("#insp-close").onclick = closeInspectorByUser;
@@ -1312,6 +1496,9 @@ $("#composer").onsubmit = (e) => e.preventDefault();
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && S.insp && !$("#dialog").open) closeInspectorByUser();
 });
+// Keep the time labels on the board current (live clocks tick every second).
+setInterval(tickAgoLabels, 1000);
+setInterval(() => S.pipelines.length > 1 && !document.hidden && schedulePipelineRefresh(), 5000); // other pipelines' events don't reach this tab
 // Keep durations of running items ticking.
 setInterval(() => {
   if ([...S.items.values()].some((i) => i.status === "running")) {

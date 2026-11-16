@@ -12,6 +12,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::reaper;
+
 pub struct RunSpec {
     pub program: String,
     pub args: Vec<String>,
@@ -52,13 +54,45 @@ pub fn local_event(subtype: &str, text: &str) -> Value {
 }
 
 /// Environment variables that would make the CLI bill an API key or talk to
-/// a different endpoint instead of using the subscription login.
+/// a different endpoint instead of using the subscription login, and the ones
+/// `cargo run` sets for ClaudeChain itself. rustup's RUSTUP_TOOLCHAIN would
+/// otherwise override the worktree's rust-toolchain.toml in every build the
+/// agent runs, so its builds use a different compiler and share no cache.
 fn scrub_env(cmd: &mut Command) {
     for (key, _) in std::env::vars_os() {
         let k = key.to_string_lossy();
-        if k.starts_with("ANTHROPIC_") || k == "CLAUDECODE" || k.starts_with("CLAUDE_CODE_") {
+        if k.starts_with("ANTHROPIC_")
+            || k == "CLAUDECODE"
+            || k.starts_with("CLAUDE_CODE_")
+            || from_cargo_run(&k)
+        {
             cmd.env_remove(&key);
         }
+    }
+}
+
+/// Set by rustup's proxy or by `cargo run` for the program being run; never
+/// configuration the user chose (CARGO_HOME, CARGO_TARGET_DIR stay).
+fn from_cargo_run(k: &str) -> bool {
+    matches!(
+        k,
+        "RUSTUP_TOOLCHAIN"
+            | "RUSTUP_TOOLCHAIN_SOURCE"
+            | "CARGO"
+            | "CARGO_MANIFEST_DIR"
+            | "CARGO_MANIFEST_PATH"
+            | "CARGO_CRATE_NAME"
+            | "CARGO_BIN_NAME"
+            | "CARGO_PRIMARY_PACKAGE"
+    ) || k.starts_with("CARGO_PKG_")
+}
+
+/// Kills the agent's leftover processes when dropped.
+struct Sweep(String);
+
+impl Drop for Sweep {
+    fn drop(&mut self) {
+        reaper::kill_all(&self.0, None);
     }
 }
 
@@ -86,6 +120,8 @@ pub async fn run(
         .stderr(Stdio::from(stderr_file))
         .kill_on_drop(true);
     scrub_env(&mut cmd);
+    let marker = reaper::new_marker();
+    cmd.env(reaper::MARKER_VAR, &marker);
     // If ClaudeChain dies (even by SIGKILL), take the agent down with it.
     #[cfg(target_os = "linux")]
     unsafe {
@@ -98,6 +134,9 @@ pub async fn run(
     }
     let mut child = cmd.spawn().with_context(|| format!("starting {}", spec.program))?;
     spec.pid.store(child.id().unwrap_or(0), Ordering::Relaxed);
+    // However the run ends (stopped, finished, errored, task dropped), take
+    // down whatever the agent left running: builds, servers, watchers.
+    let _sweep = Sweep(marker.clone());
     let mut stdin = child.stdin.take();
     let mut stdout = BufReader::new(child.stdout.take().expect("piped stdout")).lines();
 
@@ -159,6 +198,8 @@ pub async fn run(
                 result.stopped = true;
                 let ev = local_event("stopped", "Stopped by the human");
                 log(&mut events, &ev.to_string(), &ev).await;
+                let (marker, root) = (marker.clone(), child.id());
+                let _ = tokio::task::spawn_blocking(move || reaper::kill_all(&marker, root)).await;
                 let _ = child.start_kill();
             }
         }
