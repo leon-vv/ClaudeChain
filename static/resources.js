@@ -129,7 +129,15 @@ function renderPlanCard() {
   if (pause && document.activeElement !== pause) pause.value = S.account?.pause_above ?? "";
   const windows = planWindows();
   const at = S.account?.limits?.at;
-  box.replaceChildren(card("Plan usage",
+  const refresh = h("button", { class: "small", title: "Forget the recorded usage and let queued runs start. Use this after resetting your limit on claude.ai; the next run reports fresh numbers." }, "Refresh");
+  refresh.onclick = () => act(async () => {
+    S.account = await api("POST", "/api/limits/refresh");
+    renderPlan();
+    renderPlanCard();
+    toast("Usage cleared; queued runs can start again");
+  });
+  box.replaceChildren(h("section", { class: "card" },
+    h("div", { class: "card-head" }, h("h2", {}, "Plan usage"), refresh),
     S.account?.paused ? h("div", { class: "banner warn" }, `⏸ New runs are paused: ${S.account.paused}`) : "",
     windows.length
       ? h("div", { class: "windows" }, windows.map((w) => h("div", { class: "window" },

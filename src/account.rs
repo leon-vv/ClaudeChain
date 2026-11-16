@@ -18,6 +18,10 @@ const MAX_RECENT: usize = 10;
 pub struct Recent {
     pub repo: PathBuf,
     pub data: PathBuf,
+    /// Main branch chosen for the repository; empty for entries saved
+    /// before it could be chosen.
+    #[serde(default)]
+    pub main: String,
 }
 
 /// The `rate_limit_info` of the CLI's latest `rate_limit_event`.
@@ -99,6 +103,14 @@ impl Account {
             Self::save(&saved);
         }
         changed
+    }
+
+    /// Forgets the recorded usage, e.g. after the user reset their limit
+    /// outside ClaudeChain. The next agent run reports fresh values.
+    pub fn forget_limits(&self) {
+        let mut saved = self.saved.lock().unwrap();
+        saved.limits = None;
+        Self::save(&saved);
     }
 
     pub fn pause_above(&self) -> Option<f64> {

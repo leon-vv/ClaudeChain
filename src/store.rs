@@ -233,6 +233,10 @@ pub struct Item {
     pub base_commit: Option<String>,
     #[serde(default)]
     pub pr_url: Option<String>,
+    /// Bytes on disk used by the item's folder and worktree; refreshed
+    /// periodically while the server runs.
+    #[serde(default)]
+    pub disk: Option<u64>,
 }
 
 impl Item {
@@ -282,6 +286,8 @@ impl Item {
 pub struct Layout {
     pub repo: PathBuf,
     pub data: PathBuf,
+    /// Branch new worktrees are created from.
+    pub main: String,
 }
 
 impl Layout {

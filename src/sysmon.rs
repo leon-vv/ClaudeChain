@@ -324,6 +324,24 @@ fn read_disk(path: &Path) -> Option<Disk> {
     })
 }
 
+/// Interval between disk usage measurements of the items (walking worktrees
+/// with build output is expensive).
+pub const DISK_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Total bytes on disk (allocated blocks) of everything under `path`, which
+/// may be missing (0). Symlinks are not followed; unreadable entries are
+/// skipped.
+pub fn dir_size(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = std::fs::symlink_metadata(path) else { return 0 };
+    let own = meta.blocks() * 512;
+    if !meta.is_dir() {
+        return own;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else { return own };
+    own + entries.flatten().map(|e| dir_size(&e.path())).sum::<u64>()
+}
+
 fn clock_ticks() -> f64 {
     let t = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     if t > 0 { t as f64 } else { 100.0 }
@@ -368,6 +386,21 @@ mod tests {
     fn write(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn dir_size_sums_files_recursively() {
+        let root = std::env::temp_dir().join(format!("claudechain-dirsize-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(dir_size(&root), 0);
+        let empty = {
+            std::fs::create_dir_all(&root).unwrap();
+            dir_size(&root)
+        };
+        write(&root.join("a/b/big.txt"), &"x".repeat(100_000));
+        let size = dir_size(&root);
+        assert!(size >= empty + 100_000, "{size}");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

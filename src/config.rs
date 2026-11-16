@@ -24,6 +24,10 @@ pub struct Step {
     pub id: String,
     pub name: String,
     pub model: String,
+    /// Thinking level passed to `claude --effort` (low, medium, high, xhigh, max).
+    /// None uses Claude's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     #[serde(default = "default_workers")]
     pub max_workers: usize,
     #[serde(default)]
@@ -51,6 +55,9 @@ fn default_models() -> Vec<String> {
         .map(String::from)
         .to_vec()
 }
+
+/// Accepted values for `Step::effort` (`claude --effort`).
+pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 const DEFAULT_PIPELINE: &str = include_str!("../defaults/pipeline.toml");
 const DEFAULT_PROMPTS: &[(&str, &str)] = &[
@@ -99,6 +106,11 @@ impl Pipeline {
             }
             if s.model.trim().is_empty() {
                 bail!("step '{}' needs a model", s.id);
+            }
+            if let Some(e) = &s.effort
+                && !EFFORT_LEVELS.contains(&e.as_str())
+            {
+                bail!("step '{}' has unknown effort '{}': use one of {}", s.id, e, EFFORT_LEVELS.join(", "));
             }
             if !s.tools.iter().any(|t| t == "Write") {
                 bail!("step '{}' needs the Write tool to write its message and transition files", s.name);
@@ -187,5 +199,26 @@ mod tests {
         for s in &p.steps {
             assert!(DEFAULT_PROMPTS.iter().any(|(id, _)| *id == s.id), "no default prompt for {}", s.id);
         }
+    }
+
+    #[test]
+    fn effort_parses_and_validates() {
+        let text = |effort: &str| {
+            format!(
+                "[[step]]\nid = \"a\"\nname = \"A\"\nmodel = \"m\"\n{effort}\
+                 allowed_targets = [\"next\"]\ntools = [\"Write\"]\n"
+            )
+        };
+        let p: Pipeline = toml::from_str(&text("")).unwrap();
+        p.validate().unwrap();
+        assert_eq!(p.steps[0].effort, None);
+        assert!(!toml::to_string_pretty(&p).unwrap().contains("effort"));
+
+        let p: Pipeline = toml::from_str(&text("effort = \"xhigh\"\n")).unwrap();
+        p.validate().unwrap();
+        assert_eq!(p.steps[0].effort.as_deref(), Some("xhigh"));
+
+        let p: Pipeline = toml::from_str(&text("effort = \"turbo\"\n")).unwrap();
+        assert!(p.validate().is_err());
     }
 }

@@ -3,6 +3,10 @@
 // ---- State ---------------------------------------------------------------
 
 const S = {
+  // Id of the repository this tab looks at. It lives in the page URL
+  // (?repo=<id>), not in localStorage, so each tab can show another one.
+  repoId: new URLSearchParams(location.search).get("repo"),
+  es: null, // EventSource for repoId
   repo: null,
   data: null,
   defaultData: null,
@@ -38,6 +42,8 @@ function h(tag, attrs = {}, ...children) {
 }
 
 async function api(method, path, body) {
+  // Every request is about this tab's repository (see web::RepoQuery).
+  if (S.repoId) path += `${path.includes("?") ? "&" : "?"}repo=${encodeURIComponent(S.repoId)}`;
   const res = await fetch(path, {
     method,
     // The server rejects changes without this header (see web::guard).
@@ -141,6 +147,39 @@ function fmtDuration(run) {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
 }
 
+/// "just now", "45s ago", "10m ago", "3h ago", "yesterday", "3 days ago", … "2 years ago".
+function fmtAgo(iso) {
+  const s = Math.max(0, Math.floor((Date.now() - new Date(iso)) / 1000));
+  if (s < 10) return "just now";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const hr = Math.floor(m / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const d = Math.floor(hr / 24);
+  const plural = (n, unit) => `${n} ${unit}${n === 1 ? "" : "s"} ago`;
+  if (d === 1) return "yesterday";
+  if (d < 7) return plural(d, "day");
+  if (d < 30) return plural(Math.floor(d / 7), "week");
+  if (d < 365) return plural(Math.max(1, Math.floor(d / 30)), "month");
+  return plural(Math.floor(d / 365), "year");
+}
+
+/// Elapsed time since `iso` as a clock: "3:23", or "1:03:23" past an hour.
+function fmtClock(iso) {
+  const s = Math.max(0, Math.floor((Date.now() - new Date(iso)) / 1000));
+  const ss = String(s % 60).padStart(2, "0");
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m}:${ss}` : `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}:${ss}`;
+}
+
+/// Refresh the text of every time label on the board without re-rendering it.
+function tickAgoLabels() {
+  for (const el of document.querySelectorAll(".cell .ago")) {
+    el.textContent = el.dataset.end ? fmtAgo(el.dataset.end) : fmtClock(el.dataset.start);
+  }
+}
+
 const STATUS_LABEL = {
   queued: "⏳ queued",
   awaiting_approval: "⏸ awaiting approval",
@@ -153,9 +192,13 @@ const STATUS_LABEL = {
 
 async function load() {
   const st = await api("GET", "/api/state");
+  // A tab without a repository in its URL gets the default one; pin it so
+  // opening another repository elsewhere doesn't change this tab.
+  if (st.id && st.id !== S.repoId) setRepoId(st.id);
   S.repo = st.repo;
   S.data = st.data ?? null;
   S.defaultData = st.default_data ?? null;
+  S.main = st.main ?? null;
   S.recent = st.recent || [];
   S.home = st.home;
   S.pipeline = st.pipeline ?? null;
@@ -167,7 +210,7 @@ async function load() {
   S.items = new Map((st.items || []).map((i) => [i.id, i]));
   // The folder name keeps the header on one line; the tooltip has the full path.
   $("#repo-path").textContent = st.repo ? st.repo.replace(/\/+$/, "").split("/").pop() : "no repository";
-  $("#repo").title = st.repo ? `Repository ${st.repo}\nData ${st.data}\n\nClick to open another repository` : "Open a repository";
+  $("#repo").title = st.repo ? `Repository ${st.repo}\nData ${st.data}\nMain branch ${st.main}\n\nClick to open another repository` : "Open a repository";
   $("#btn-add").disabled = !st.repo;
   $("#no-repo").hidden = !!st.repo;
   // Without a repository the page is a landing page: no top bar, just a card for opening one.
@@ -191,13 +234,12 @@ function renderLanding() {
     const data = r.data === `${r.repo.replace(/\/+$/, "")}/.claudechain` ? null : r.data;
     return h("li", {},
       h("button", {
-        title: `Open ${r.repo}\nData ${r.data}`,
+        title: `Open ${r.repo}\nData ${r.data}${r.main ? `\nMain branch ${r.main}` : ""}`,
         onclick: async (e) => {
           const btn = e.currentTarget;
           btn.disabled = true;
           try {
-            await api("POST", "/api/workspace", { repo: r.repo, data });
-            await load();
+            await openRepo({ repo: r.repo, data, main: r.main || null });
           } catch (err) {
             toast(err.message);
           } finally {
@@ -210,8 +252,31 @@ function renderLanding() {
   }));
 }
 
+/// Points this tab at repository `id`: the URL, the event stream and later API calls.
+function setRepoId(id) {
+  S.repoId = id;
+  const params = new URLSearchParams(location.search);
+  params.set("repo", id);
+  history.replaceState(null, "", `${location.pathname}?${params}${location.hash}`);
+  if (S.es?.repoId !== id) connect();
+}
+
+/// Opens a repository on the server and switches this tab to it. Other tabs
+/// keep showing theirs.
+async function openRepo(body) {
+  const { id } = await api("POST", "/api/workspace", body);
+  if (id !== S.repoId) {
+    closeInspector();
+    setRepoId(id);
+  }
+  await load();
+}
+
 function connect() {
-  const es = new EventSource("/api/events");
+  S.es?.close();
+  const es = new EventSource(S.repoId ? `/api/events?repo=${encodeURIComponent(S.repoId)}` : "/api/events");
+  es.repoId = S.repoId;
+  S.es = es;
   es.onopen = () => {
     $("#conn").classList.add("on");
     load();
@@ -219,12 +284,6 @@ function connect() {
   es.onerror = () => $("#conn").classList.remove("on");
   es.onmessage = (m) => {
     const ev = JSON.parse(m.data);
-    // All pipelines of the repository run at once; only show the open one's
-    // events, but keep the running counts in the pipeline dropdown fresh.
-    if (ev.data_dir && ev.data_dir !== S.data) {
-      if (ev.kind === "item" || ev.kind === "item_removed") schedulePipelineRefresh();
-      return;
-    }
     switch (ev.kind) {
       case "item":
         S.items.set(ev.item.id, ev.item);
@@ -242,7 +301,8 @@ function connect() {
         if (S.page === "resources") renderResources();
         break;
       case "workspace":
-        closeInspector();
+        // Some tab opened a repository; this tab keeps its own, but the
+        // recent list may have changed.
         load();
         break;
       case "pipeline":
@@ -300,6 +360,16 @@ function renderBoard() {
   board.replaceChildren(h("thead", {}, head), h("tbody", {}, rows));
 }
 
+// Thinking levels for `claude --effort`; "" means Claude's default (no flag).
+const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+
+function effortOptions(current, defaultLabel) {
+  return [
+    h("option", { value: "", selected: !current }, defaultLabel),
+    ...EFFORT_LEVELS.map((e) => h("option", { value: e, selected: e === current }, e)),
+  ];
+}
+
 function stepHeader(s, busy) {
   const models = [...new Set([...S.pipeline.models, s.model])];
   const put = (body) => act(() => api("PUT", `/api/steps/${s.id}`, body));
@@ -311,6 +381,8 @@ function stepHeader(s, busy) {
       h("div", { class: "row" },
         h("select", { title: "Model", onchange: (e) => put({ model: e.target.value }) },
           models.map((m) => h("option", { value: m, selected: m === s.model }, shortModel(m)))),
+        h("select", { title: "Thinking level (claude --effort)", onchange: (e) => put({ effort: e.target.value }) },
+          effortOptions(s.effort, "effort: default")),
       ),
       h("div", { class: "row" },
         h("button", { class: "small", title: `${s.name} prompt`, onclick: () => editPrompt(s.id, `${s.name} prompt`) }, "Edit prompt"),
@@ -360,7 +432,7 @@ function itemCell(it) {
       tokens > 0 && h("span", { title: `${tokens.toLocaleString()} tokens over ${it.runs.length} runs; ≈ ${fmtCost(cost)} API-equivalent (covered by your subscription)` }, `${fmtTok(tokens)} tok`),
     ),
     it.status === "done" && h("div", { class: `state done` }, STATUS_LABEL.done),
-    it.pending_notes.length > 0 && h("div", { class: "detail" }, `📝 ${it.pending_notes.length} note(s) for the next run`),
+    it.pending_notes.length > 0 && h("div", { class: "detail" }, `💬 ${it.pending_notes.length} message(s) waiting for the next run`),
   );
 }
 // Last column: restart and remove buttons, always shown.
@@ -403,6 +475,16 @@ function stepCell(it, s) {
     class: `cell${current ? " current" : ""}`,
     onclick: () => openInspector(it.id, runs.length ? runs[runs.length - 1].n : null),
   });
+  // Top-right time label: live clock while this step's run is going, else how long ago it finished.
+  const lastRun = runs[runs.length - 1];
+  if (lastRun) {
+    const live = current && it.status === "running" && !lastRun.ended && lastRun === it.runs[it.runs.length - 1];
+    if (live) {
+      td.append(h("span", { class: "ago running", "data-start": lastRun.started, title: `Running since ${new Date(lastRun.started).toLocaleString()}` }, fmtClock(lastRun.started)));
+    } else if (lastRun.ended) {
+      td.append(h("span", { class: "ago", "data-end": lastRun.ended, title: `Finished ${new Date(lastRun.ended).toLocaleString()}` }, fmtAgo(lastRun.ended)));
+    }
+  }
   if (runs.length) {
     td.append(h("div", { class: "chips" }, runs.map((r) =>
       h("span", {
@@ -418,13 +500,17 @@ function stepCell(it, s) {
     td.append(h("div", { class: `state ${cls}${cls === "running" ? " pulse" : ""}`, title: tokTitle(live) },
       STATUS_LABEL[cls], live ? ` · ${fmtTok(tokTotal(live))}` : ""));
     const u = liveRun && !liveRun.ended ? liveRun.usage : null;
+    const disk = it.disk != null ? h("span", { class: "info", title: "Disk space used by this item (its folder and worktree)" }, `Disk ${fmtBytes(it.disk)}`) : null;
     if (u) {
       td.append(h("div", {
         class: "usage",
         title: `Agent and all its sub-processes (${u.processes} process${u.processes === 1 ? "" : "es"})\nCPU in % of one core · peak ${fmtCpu(u.cpu_max)}\nMemory peak ${fmtBytes(u.rss_max)}`,
       },
         h("span", { class: "info" }, `CPU ${fmtCpu(u.cpu)}`),
-        h("span", { class: "info" }, fmtBytes(u.rss))));
+        h("span", { class: "info" }, fmtBytes(u.rss)),
+        disk));
+    } else if (disk) {
+      td.append(h("div", { class: "usage" }, disk));
     }
     if (it.status === "awaiting_approval") {
       td.append(h("div", { class: "gate" },
@@ -547,24 +633,36 @@ function renderInspectorChrome() {
 
 function renderComposer(item, run) {
   const actions = $("#composer-actions");
-  const text = () => $("#composer-text").value.trim();
-  const send = (mode) => act(async () => {
-    if (!text()) return toast("Type a message first");
-    await api("POST", `/api/items/${item.id}/message`, { text: text(), mode, run: run?.n });
-    $("#composer-text").value = "";
-    toast(mode === "live" ? "Sent to the agent" : mode === "note" ? "Saved for the next run" : "Run continues with your message");
+  const input = $("#composer-text");
+  const send = () => act(async () => {
+    const text = input.value.trim();
+    if (!text) return;
+    // The server picks the delivery: live, continue the session, or next run.
+    const res = await api("POST", `/api/items/${item.id}/message`, { text, mode: "auto", run: run?.n });
+    if (input.value.trim() === text) input.value = "";
+    const how = res?.delivered;
+    toast(how === "live" ? "Sent to the agent"
+      : how === "continue" ? "The agent continues with your message"
+      : "The agent will get your message when it starts");
   });
-  const live = item.status === "running" && run && !run.ended;
-  const canContinue = item.status !== "running" && run?.session_id;
-  actions.replaceChildren(...[
+  const live = item.status === "running";
+  const canContinue = !live && run?.session_id;
+  input.placeholder = live ? "Message the agent… (Enter to send, Shift+Enter for a new line)"
+    : canContinue ? `Message the agent to continue run #${run.n}…`
+    : "Message for the agent…";
+  input.onkeydown = (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      send();
+    }
+  };
+  actions.replaceChildren(
     h("span", { class: "hint" },
-      live ? "The agent sees your message on its next turn."
-        : canContinue ? `Continue resumes run #${run.n}'s session with full context; a note is added to the next run's prompt.`
-        : "Notes are added to the next run's prompt."),
-    live && h("button", { type: "button", class: "primary", onclick: () => send("live") }, "Send to agent"),
-    !live && canContinue && h("button", { type: "button", class: "primary", onclick: () => send("continue") }, "Continue this run"),
-    h("button", { type: "button", onclick: () => send("note") }, "Note for next run"),
-  ].filter(Boolean));
+      live ? "The agent reads your message right away, you don't have to wait for it to finish."
+        : canContinue ? `Sending resumes run #${run.n}'s session with full context.`
+        : "Your message is included when the agent starts."),
+    h("button", { type: "button", class: "primary", onclick: send }, "Send"),
+  );
 }
 
 function renderTab() {
@@ -692,6 +790,7 @@ function renderInput(body, d) {
   body.append(
     kv([
       ["Model", i.model],
+      ["Effort", i.effort],
       ["Step", stepName(i.step)],
       ["Tools", (i.tools || []).join(", ")],
       ["Permission mode", i.permission_mode],
@@ -860,8 +959,16 @@ function folderBrowser(onSelect) {
 function workspaceDialog() {
   const repo = h("input", { type: "text", value: S.repo ?? "", placeholder: "/path/to/your/repository" });
   const data = h("input", { type: "text", value: S.data && S.data !== S.defaultData ? S.data : "" });
+  const main = h("input", { type: "text", value: S.main ?? "", placeholder: "default: remembered, else the remote's default branch" });
   const updatePlaceholder = () => (data.placeholder = repo.value.trim() ? `default: ${repo.value.trim().replace(/\/$/, "")}/.claudechain` : "default: <repository>/.claudechain");
-  repo.oninput = updatePlaceholder;
+  // A different repository gets its own remembered main branch (or the default).
+  const sameRepo = (a, b) => a.replace(/\/+$/, "") === b.replace(/\/+$/, "");
+  const repoChanged = () => {
+    updatePlaceholder();
+    const r = repo.value.trim();
+    main.value = (r && sameRepo(r, S.repo ?? "") ? S.main : S.recent.find((x) => sameRepo(x.repo, r))?.main) ?? "";
+  };
+  repo.oninput = repoChanged;
   updatePlaceholder();
   // Clicking a folder fills the most recently focused input (Repository by default).
   let target = repo;
@@ -875,20 +982,22 @@ function workspaceDialog() {
   setTarget(repo);
   const browser = folderBrowser((path) => {
     target.value = path;
-    updatePlaceholder();
+    if (target === repo) repoChanged();
+    else updatePlaceholder();
   });
   const recent = S.recent.length
     ? h("div", {}, h("label", {}, "Recent"), h("div", { class: "recent" }, S.recent.map((r) =>
-        h("button", { onclick: () => { repo.value = r.repo; data.value = r.data === `${r.repo}/.claudechain` ? "" : r.data; updatePlaceholder(); } },
-          r.repo, h("small", {}, `data: ${r.data}`)))))
+        h("button", { onclick: () => { repo.value = r.repo; data.value = r.data === `${r.repo}/.claudechain` ? "" : r.data; main.value = r.main || ""; updatePlaceholder(); } },
+          r.repo, h("small", {}, `data: ${r.data}${r.main ? ` · main branch: ${r.main}` : ""}`)))))
     : "";
   dialog("Open repository", [
-    h("p", { class: "help" }, "ClaudeChain works on one git repository at a time. Its pipeline, prompts, work items and worktrees are kept in the data directory, so each repository keeps its own setup. All pipelines of the open repository run at the same time. When you open another repository, the old one's idle pipelines stop; pipelines with running agents keep going in the background."),
+    h("p", { class: "help" }, "This tab switches to the repository you open. Repositories opened earlier stay open and keep running their agents; open another browser tab to look at several at the same time. The pipeline, prompts, work items and worktrees are kept in the data directory, so each repository keeps its own setup."),
     recent,
     browser.el,
     h("label", {}, "Repository"), h("div", { class: "field" }, repo),
     h("label", {}, "Data directory (optional)"), h("div", { class: "field" }, data),
-  ], () => api("POST", "/api/workspace", { repo: repo.value, data: data.value || null }), "Open", true);
+    h("label", { title: "New work items get their worktree branch from this local branch." }, "Main branch (optional)"), h("div", { class: "field" }, main),
+  ], () => openRepo({ repo: repo.value, data: data.value || null, main: main.value.trim() || null }), "Open", true);
   browser.go(S.repo ? S.repo.replace(/\/[^/]+\/?$/, "") || "/" : "");
 }
 
@@ -903,13 +1012,13 @@ function renderPipelineSelect() {
   sel.hidden = !S.repo;
   if (!S.repo) return sel.replaceChildren();
   sel.replaceChildren(
-    ...S.pipelines.map((p) => h("option", { value: p.data, selected: p.data === S.data, title: p.data },
+    ...S.pipelines.map((p) => h("option", { value: p.id, selected: p.id === S.repoId, title: p.data },
       p.name, p.missing ? " (missing)" : "", p.running ? ` · ${p.running} running` : "")),
     h("option", { disabled: true }, "──────────"),
     h("option", { value: PIPE_NEW }, "+ New pipeline…"),
     h("option", { value: PIPE_RENAME }, "✎ Rename current…"),
   );
-  sel.value = S.data;
+  sel.value = S.repoId;
   sel.title = `Pipeline "${S.pipelineName ?? ""}"\nData ${S.data}`;
 }
 
@@ -920,7 +1029,7 @@ function schedulePipelineRefresh() {
     schedulePipelineRefresh.timer = null;
     try {
       const st = await api("GET", "/api/state");
-      if (st.data !== S.data) return load();
+      if (st.id !== S.repoId) return;
       S.pipelines = st.pipelines || [];
       renderPipelineSelect();
     } catch {}
@@ -929,13 +1038,14 @@ function schedulePipelineRefresh() {
 
 async function onPipelineSelect(e) {
   const v = e.target.value;
-  e.target.value = S.data; // the selection follows the open pipeline, not the click
+  e.target.value = S.repoId; // the selection follows the open pipeline, not the click
   if (v === PIPE_NEW) return addPipelineDialog();
   if (v === PIPE_RENAME) return renamePipelineDialog();
-  if (!v || v === S.data) return;
+  if (!v || v === S.repoId) return;
   await act(async () => {
-    await api("POST", "/api/workspace", { repo: S.repo, data: v });
+    // Pipelines of the repository are open apps of their own; move this tab to it.
     closeInspector();
+    setRepoId(v);
     await load();
   });
 }
@@ -962,8 +1072,9 @@ function addPipelineDialog() {
     browser.el,
     h("label", {}, "Folder"), h("div", { class: "field" }, data),
   ], async () => {
-    await api("POST", "/api/pipelines", { name: name.value, data: data.value });
+    const { id } = await api("POST", "/api/pipelines", { name: name.value, data: data.value });
     closeInspector();
+    setRepoId(id);
     await load();
   }, "Create", true);
   browser.go(S.repo);
@@ -1072,6 +1183,7 @@ function pipelineDialog() {
   const applyPreset = (step, p) => {
     step.name = p.name;
     step.model = p.model;
+    step.effort = p.effort ?? null;
     step.max_workers = p.max_workers;
     step.require_approval = p.require_approval;
     step.permission_mode = p.permission_mode;
@@ -1120,6 +1232,8 @@ function pipelineDialog() {
         h("span", { class: "lbl" }, "Model"),
         h("div", { class: "inline" },
           h("select", { onchange: (e) => (step.model = e.target.value) }, models.map((m) => h("option", { value: m, selected: m === step.model }, m))),
+          h("label", { title: "Thinking level (claude --effort)" }, "effort",
+            h("select", { onchange: (e) => (step.effort = e.target.value || null) }, effortOptions(step.effort, "default"))),
           h("label", {}, "workers", h("input", { type: "number", min: 0, max: 32, value: step.max_workers, onchange: (e) => (step.max_workers = Math.max(0, parseInt(e.target.value, 10) || 0)) })),
           check("requires approval", step.require_approval, (v) => (step.require_approval = v)),
           h("label", { title: "claude --permission-mode" }, "permissions",
@@ -1210,7 +1324,7 @@ function showPage(page) {
   $("#resources-page").hidden = page !== "resources";
   for (const b of document.querySelectorAll("#pages button")) b.classList.toggle("active", b.dataset.page === page);
   if (page !== "board") closeInspector();
-  if (location.hash !== (page === "board" ? "" : `#${page}`)) history.replaceState(null, "", page === "board" ? location.pathname : `#${page}`);
+  if (location.hash !== (page === "board" ? "" : `#${page}`)) history.replaceState(null, "", `${location.pathname}${location.search}${page === "board" ? "" : `#${page}`}`);
   if (page === "resources") startResources();
   else stopResources();
 }
@@ -1324,6 +1438,9 @@ $("#composer").onsubmit = (e) => e.preventDefault();
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && S.insp && !$("#dialog").open) closeInspector();
 });
+// Keep the time labels on the board current (live clocks tick every second).
+setInterval(tickAgoLabels, 1000);
+setInterval(() => S.pipelines.length > 1 && !document.hidden && schedulePipelineRefresh(), 5000); // other pipelines' events don't reach this tab
 // Keep durations of running items ticking.
 setInterval(() => {
   if ([...S.items.values()].some((i) => i.status === "running")) {
