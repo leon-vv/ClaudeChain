@@ -80,6 +80,8 @@ pub fn router(ws: Ws, allowed_hosts: Vec<String>) -> Router {
         .route("/api/state", get(state))
         .route("/api/events", get(events))
         .route("/api/workspace", post(open_workspace))
+        .route("/api/pipelines", post(add_pipeline))
+        .route("/api/pipelines/rename", post(rename_pipeline))
         .route("/api/fs", get(list_dir))
         .route("/api/resources", get(resources))
         .route("/api/limits", put(put_limits))
@@ -155,6 +157,17 @@ async fn state(State(ws): State<Ws>, Query(q): Query<RepoQuery>) -> Json<Value> 
         obj.insert("steps".into(), steps);
     }
     let items: Vec<_> = app.items.lock().unwrap().values().cloned().collect();
+    let known = workspace::pipelines(&app.layout.repo, &app.layout.data);
+    let live = ws.apps();
+    let pipelines: Vec<Value> = known
+        .pipelines
+        .iter()
+        .map(|p| {
+            let running = live.iter().find(|a| a.layout.repo == app.layout.repo && a.layout.data == p.data).map_or(0, |a| a.agents().len());
+            let id = workspace::repo_id(&app.layout.repo, &p.data);
+            json!({"id": id, "name": p.name, "data": p.data, "missing": !p.data.is_dir(), "running": running})
+        })
+        .collect();
     Json(json!({
         "id": app.id,
         "repo": app.layout.repo,
@@ -166,6 +179,8 @@ async fn state(State(ws): State<Ws>, Query(q): Query<RepoQuery>) -> Json<Value> 
         "home": workspace::home_dir(),
         "account": orchestrator::account_json(&ws.account),
         "pipeline": pipeline,
+        "pipeline_name": known.name,
+        "pipelines": pipelines,
         "items": items,
     }))
 }
@@ -197,6 +212,27 @@ async fn open_workspace(State(ws): State<Ws>, Json(o): Json<OpenWorkspace>) -> A
 }
 
 #[derive(Deserialize)]
+struct AddPipeline {
+    name: String,
+    data: String,
+}
+
+async fn add_pipeline(Cur(app): Cur, State(ws): State<Ws>, Json(p): Json<AddPipeline>) -> ApiResult<Json<Value>> {
+    let id = ws.add_pipeline(&app, &p.name, FsPath::new(p.data.trim())).await?;
+    Ok(Json(json!({ "id": id })))
+}
+
+#[derive(Deserialize)]
+struct RenamePipeline {
+    name: String,
+}
+
+async fn rename_pipeline(Cur(app): Cur, State(ws): State<Ws>, Json(p): Json<RenamePipeline>) -> ApiResult<Json<Value>> {
+    ws.rename_pipeline(&app, &p.name).await?;
+    Ok(Json(json!({})))
+}
+
+#[derive(Deserialize)]
 struct DirQuery {
     #[serde(default)]
     path: String,
@@ -209,18 +245,19 @@ async fn list_dir(Query(q): Query<DirQuery>) -> ApiResult<Json<Value>> {
 }
 
 /// System load, history, and CPU/memory of each running agent's process
-/// tree (agents of the tab's repository only; see `RepoQuery`).
+/// tree: the agents of every pipeline of the tab's repository (`data` and
+/// `pipeline` say which one; see `RepoQuery`).
 async fn resources(State(ws): State<Ws>, Query(q): Query<RepoQuery>) -> Json<Value> {
-    let agents: Vec<Value> = ws
-        .app(q.repo.as_deref().filter(|r| !r.is_empty()))
-        .map(|app| app.agents())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|a| {
-            let usage = ws.monitor.tree(a.pid);
-            json!({"agent": a, "usage": usage})
-        })
-        .collect();
+    let mut agents: Vec<Value> = vec![];
+    if let Some(cur) = ws.app(q.repo.as_deref().filter(|r| !r.is_empty())) {
+        for app in ws.apps().into_iter().filter(|a| a.layout.repo == cur.layout.repo) {
+            let name = workspace::pipelines(&app.layout.repo, &app.layout.data).name;
+            for a in app.agents() {
+                let usage = ws.monitor.tree(a.pid);
+                agents.push(json!({"agent": a, "usage": usage, "data": app.layout.data, "pipeline": name}));
+            }
+        }
+    }
     Json(json!({
         "system": ws.monitor.latest(),
         "history": ws.monitor.history(),

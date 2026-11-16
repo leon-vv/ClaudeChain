@@ -299,8 +299,18 @@ impl App {
 
         let first = self.pipeline().steps[0].id.clone();
         let now = Utc::now();
+        // Pipelines other than the default one share the repository, so their
+        // branches get the data folder's name to keep item ids from colliding.
+        let branch = match self.layout.data.file_name().map(|n| n.to_string_lossy().to_string()) {
+            Some(dir) if self.layout.data != crate::workspace::default_data_dir(&self.layout.repo) => {
+                let dir: String = dir.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
+                let dir = dir.trim_matches('-');
+                if dir.is_empty() { format!("claudechain/{id}") } else { format!("claudechain/{dir}-{id}") }
+            }
+            _ => format!("claudechain/{id}"),
+        };
         let item = Item {
-            branch: format!("claudechain/{id}"),
+            branch,
             id: id.clone(),
             number,
             title,

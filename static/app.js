@@ -13,6 +13,8 @@ const S = {
   recent: [],
   home: "",
   pipeline: null,
+  pipelineName: null,
+  pipelines: [], // [{ name, data, missing }] from <data>/pipelines.json
   items: new Map(),
   insp: null, // { id, run, tab, data, file }
   account: null, // { limits, pause_above, paused }
@@ -200,7 +202,10 @@ async function load() {
   S.recent = st.recent || [];
   S.home = st.home;
   S.pipeline = st.pipeline ?? null;
+  S.pipelineName = st.pipeline_name ?? null;
+  S.pipelines = st.pipelines || [];
   S.account = st.account ?? null;
+  renderPipelineSelect();
   renderPlan();
   S.items = new Map((st.items || []).map((i) => [i.id, i]));
   // The folder name keeps the header on one line; the tooltip has the full path.
@@ -996,6 +1001,98 @@ function workspaceDialog() {
   browser.go(S.repo ? S.repo.replace(/\/[^/]+\/?$/, "") || "/" : "");
 }
 
+// Pipelines ----------------------------------------------------------------
+// Each pipeline is a data directory of the same repository; <data>/pipelines.json
+// names it and lists the others, which fills this dropdown.
+
+const PIPE_NEW = ":new", PIPE_RENAME = ":rename"; // data paths are absolute, so these never clash
+
+function renderPipelineSelect() {
+  const sel = $("#pipeline-select");
+  sel.hidden = !S.repo;
+  if (!S.repo) return sel.replaceChildren();
+  sel.replaceChildren(
+    ...S.pipelines.map((p) => h("option", { value: p.id, selected: p.id === S.repoId, title: p.data },
+      p.name, p.missing ? " (missing)" : "", p.running ? ` · ${p.running} running` : "")),
+    h("option", { disabled: true }, "──────────"),
+    h("option", { value: PIPE_NEW }, "+ New pipeline…"),
+    h("option", { value: PIPE_RENAME }, "✎ Rename current…"),
+  );
+  sel.value = S.repoId;
+  sel.title = `Pipeline "${S.pipelineName ?? ""}"\nData ${S.data}`;
+}
+
+/// Refreshes only the pipeline list (running counts), at most once a second.
+function schedulePipelineRefresh() {
+  if (schedulePipelineRefresh.timer) return;
+  schedulePipelineRefresh.timer = setTimeout(async () => {
+    schedulePipelineRefresh.timer = null;
+    try {
+      const st = await api("GET", "/api/state");
+      if (st.id !== S.repoId) return;
+      S.pipelines = st.pipelines || [];
+      renderPipelineSelect();
+    } catch {}
+  }, 1000);
+}
+
+async function onPipelineSelect(e) {
+  const v = e.target.value;
+  e.target.value = S.repoId; // the selection follows the open pipeline, not the click
+  if (v === PIPE_NEW) return addPipelineDialog();
+  if (v === PIPE_RENAME) return renamePipelineDialog();
+  if (!v || v === S.repoId) return;
+  await act(async () => {
+    // Pipelines of the repository are open apps of their own; move this tab to it.
+    closeInspector();
+    setRepoId(v);
+    await load();
+  });
+}
+
+function addPipelineDialog() {
+  const name = h("input", { type: "text", placeholder: "e.g. Docs" });
+  const data = h("input", { type: "text" });
+  const repo = S.repo.replace(/\/+$/, "");
+  // Suggest <repo>/.claudechain-<name> until a folder is typed or picked.
+  let auto = true;
+  const suggest = () => {
+    const s = name.value.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    if (auto) data.value = s ? `${repo}/.claudechain-${s}` : "";
+  };
+  name.oninput = suggest;
+  data.oninput = () => (auto = !data.value);
+  const browser = folderBrowser((path) => {
+    auto = false;
+    data.value = path;
+  });
+  dialog("New pipeline", [
+    h("p", { class: "help" }, "A pipeline has its own steps, prompts, work items and worktrees, kept in its own folder (a new folder gets the default pipeline). It works on the same repository. All pipelines run at the same time; switching only changes which one you see, so running agents are not interrupted."),
+    h("label", {}, "Name"), h("div", { class: "field" }, name),
+    browser.el,
+    h("label", {}, "Folder"), h("div", { class: "field" }, data),
+  ], async () => {
+    const { id } = await api("POST", "/api/pipelines", { name: name.value, data: data.value });
+    closeInspector();
+    setRepoId(id);
+    await load();
+  }, "Create", true);
+  browser.go(S.repo);
+  setTimeout(() => name.focus(), 0);
+}
+
+function renamePipelineDialog() {
+  const name = h("input", { type: "text", value: S.pipelineName ?? "" });
+  dialog("Rename pipeline", [
+    h("p", { class: "help" }, `Only the name changes; the pipeline stays in ${S.data}.`),
+    h("label", {}, "Name"), h("div", { class: "field" }, name),
+  ], async () => {
+    await api("POST", "/api/pipelines/rename", { name: name.value });
+    await load();
+  }, "Rename");
+  setTimeout(() => { name.focus(); name.select(); }, 0);
+}
+
 // Pipeline editor ----------------------------------------------------------
 
 const KNOWN_TOOLS = ["Read", "Grep", "Glob", "Edit", "Write", "Bash", "WebFetch", "WebSearch", "NotebookEdit", "TodoWrite", "Agent"];
@@ -1237,6 +1334,7 @@ window.addEventListener("hashchange", () => showPage(location.hash === "#resourc
 
 $("#btn-add").onclick = addDialog;
 $("#repo").onclick = workspaceDialog;
+$("#pipeline-select").onchange = onPipelineSelect;
 $("#btn-open-repo").onclick = workspaceDialog;
 $("#dialog-cancel").onclick = () => $("#dialog").close();
 $("#insp-close").onclick = closeInspector;
@@ -1342,6 +1440,7 @@ document.addEventListener("keydown", (e) => {
 });
 // Keep the time labels on the board current (live clocks tick every second).
 setInterval(tickAgoLabels, 1000);
+setInterval(() => S.pipelines.length > 1 && !document.hidden && schedulePipelineRefresh(), 5000); // other pipelines' events don't reach this tab
 // Keep durations of running items ticking.
 setInterval(() => {
   if ([...S.items.values()].some((i) => i.status === "running")) {

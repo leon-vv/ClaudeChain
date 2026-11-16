@@ -3,13 +3,17 @@
 //! looks at one of them (chosen by its id in the page URL), and every open
 //! repository keeps scheduling agents whether or not a tab shows it. Recent
 //! choices are remembered by `Account`.
+//!
+//! A repository can have several pipelines, each in its own data directory and
+//! each an open app of its own (own id, own scheduler). A tab shows one of them
+//! and the pipeline dropdown moves the tab to another; all of them keep running.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result, anyhow, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::account::{Account, Recent};
@@ -46,6 +50,93 @@ pub fn home_dir() -> PathBuf {
 
 pub fn default_data_dir(repo: &Path) -> PathBuf {
     repo.join(".claudechain")
+}
+
+/// File in each pipeline's data directory naming that pipeline and listing all
+/// pipelines (data directories) of the repository, so the UI can offer them.
+pub const PIPELINES_FILE: &str = "pipelines.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineRef {
+    pub name: String,
+    pub data: PathBuf,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Pipelines {
+    /// Name of the pipeline whose data directory holds this file.
+    pub name: String,
+    /// All known pipelines of the repository, this one included.
+    #[serde(default)]
+    pub pipelines: Vec<PipelineRef>,
+}
+
+fn read_pipelines(data: &Path) -> Option<Pipelines> {
+    let text = std::fs::read_to_string(data.join(PIPELINES_FILE)).ok()?;
+    match serde_json::from_str(&text) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            tracing::warn!("ignoring invalid {}: {e}", data.join(PIPELINES_FILE).display());
+            None
+        }
+    }
+}
+
+fn write_pipelines(data: &Path, p: &Pipelines) -> Result<()> {
+    let path = data.join(PIPELINES_FILE);
+    let tmp = data.join(format!("{PIPELINES_FILE}.tmp"));
+    std::fs::write(&tmp, serde_json::to_string_pretty(p)? + "\n").with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// The pipelines file of `data`, with defaults when it is missing: the name is
+/// "Default" for `<repo>/.claudechain` and the folder name otherwise, and the
+/// list always contains `data` itself.
+pub fn pipelines(repo: &Path, data: &Path) -> Pipelines {
+    let mut p = read_pipelines(data).unwrap_or_default();
+    if p.name.trim().is_empty() {
+        p.name = p
+            .pipelines
+            .iter()
+            .find(|r| r.data == data)
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| default_pipeline_name(repo, data));
+    }
+    match p.pipelines.iter_mut().find(|r| r.data == data) {
+        Some(r) => r.name = p.name.clone(),
+        None => p.pipelines.insert(0, PipelineRef { name: p.name.clone(), data: data.to_path_buf() }),
+    }
+    p
+}
+
+fn default_pipeline_name(repo: &Path, data: &Path) -> String {
+    if data == default_data_dir(repo) {
+        return "Default".into();
+    }
+    data.file_name().map(|n| n.to_string_lossy().trim_start_matches('.').to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "Pipeline".into())
+}
+
+/// Writes `list` to the pipelines file of every listed data directory that
+/// exists, each with its own name.
+fn sync_pipelines(list: &[PipelineRef]) -> Result<()> {
+    for r in list {
+        if r.data.is_dir() {
+            write_pipelines(&r.data, &Pipelines { name: r.name.clone(), pipelines: list.to_vec() })?;
+        }
+    }
+    Ok(())
+}
+
+fn check_name<'a>(name: &'a str, list: &[PipelineRef], except: Option<&Path>) -> Result<&'a str> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("the pipeline name is empty");
+    }
+    if list.iter().any(|r| Some(r.data.as_path()) != except && r.name.eq_ignore_ascii_case(name)) {
+        bail!("a pipeline named \"{name}\" already exists");
+    }
+    Ok(name)
 }
 
 /// Stable id for a repository and its data directory (both canonical). It
@@ -154,7 +245,31 @@ impl Workspace {
     /// does nothing, except with another main branch, which replaces it.
     /// Without `main`, the branch remembered for this repository is used,
     /// else the one git suggests.
+    ///
+    /// The other pipelines listed in the data directory's `pipelines.json`
+    /// are opened too (in the background), so their queued items progress.
     pub async fn open(&self, repo: &Path, data: Option<&Path>, main: Option<&str>) -> Result<String> {
+        let id = self.open_one(repo, data, main, false).await?;
+        if let Some(app) = self.app(Some(&id)) {
+            self.open_siblings(&app).await;
+        }
+        Ok(id)
+    }
+
+    async fn open_siblings(&self, app: &Arc<App>) {
+        for r in pipelines(&app.layout.repo, &app.layout.data).pipelines {
+            if r.data != app.layout.data
+                && r.data.is_dir()
+                && let Err(e) = self.open_one(&app.layout.repo, Some(&r.data), Some(&app.layout.main), true).await
+            {
+                tracing::warn!("could not start pipeline {} ({}): {e:#}", r.name, r.data.display());
+            }
+        }
+    }
+
+    /// Opens one repository + data directory. A `background` one (a sibling
+    /// pipeline) isn't made the default or remembered as recent.
+    async fn open_one(&self, repo: &Path, data: Option<&Path>, main: Option<&str>, background: bool) -> Result<String> {
         let _guard = self.switching.lock().await;
         let repo = std::fs::canonicalize(repo).with_context(|| format!("{} does not exist", repo.display()))?;
         git::check_repo(&repo)
@@ -181,15 +296,22 @@ impl Workspace {
         let existing = self.app(Some(&id));
         if let Some(cur) = &existing
             && cur.layout.main == main {
-                *self.default.write().unwrap() = Some(id.clone());
-                self.account.remember(Recent { repo, data, main });
-                let _ = self.events.send(Envelope::global(UiEvent::Workspace));
+                if !background {
+                    *self.default.write().unwrap() = Some(id.clone());
+                    self.account.remember(Recent { repo, data, main });
+                    let _ = self.events.send(Envelope::global(UiEvent::Workspace));
+                }
                 return Ok(id);
             }
         if let Some(other) = self.apps().into_iter().find(|a| a.layout.data == data && a.id != id) {
             bail!("data directory {} is already used by {}", data.display(), other.layout.repo.display());
         }
         git::exclude_path(&repo, &data).await?;
+        // Make sure the folder names itself and lists the pipelines it knows.
+        let list = pipelines(&repo, &data);
+        if read_pipelines(&data).is_none_or(|p| p.name != list.name || p.pipelines.len() != list.pipelines.len()) {
+            write_pipelines(&data, &list)?;
+        }
         let layout = Layout { repo: repo.clone(), data: data.clone(), main: main.clone() };
         // Another main branch for an open repository: replace its app.
         if let Some(old) = &existing {
@@ -198,11 +320,56 @@ impl Workspace {
         let app = App::new(id.clone(), layout, self.claude.clone(), self.events.clone(), self.account.clone())?;
         tokio::spawn(app.clone().scheduler());
         self.apps.write().unwrap().insert(id.clone(), app);
-        *self.default.write().unwrap() = Some(id.clone());
         tracing::info!("opened repo {} (data {}, main branch {main}, id {id})", repo.display(), data.display());
-        self.account.remember(Recent { repo, data, main });
-        let _ = self.events.send(Envelope::global(UiEvent::Workspace));
+        if !background {
+            *self.default.write().unwrap() = Some(id.clone());
+            self.account.remember(Recent { repo, data, main });
+            let _ = self.events.send(Envelope::global(UiEvent::Workspace));
+        }
         Ok(id)
+    }
+
+    /// Adds a pipeline stored in `data` to the repository of `cur`, records it
+    /// in the pipelines file of every known pipeline, opens it and returns its id.
+    pub async fn add_pipeline(&self, cur: &Arc<App>, name: &str, data: &Path) -> Result<String> {
+        // The lock is released before `open`, which takes it itself.
+        let data = {
+            let _guard = self.switching.lock().await;
+            let repo = &cur.layout.repo;
+            let mut list = pipelines(repo, &cur.layout.data).pipelines;
+            let name = check_name(name, &list, None)?;
+            if data.as_os_str().is_empty() {
+                bail!("choose a folder for the new pipeline");
+            }
+            let data = if data.is_absolute() { data.to_path_buf() } else { repo.join(data) };
+            std::fs::create_dir_all(&data).with_context(|| format!("creating {}", data.display()))?;
+            let data = std::fs::canonicalize(&data)?;
+            if data == *repo {
+                bail!("the repository itself can't be a pipeline folder; choose or create a subfolder");
+            }
+            if let Some(r) = list.iter().find(|r| r.data == data) {
+                bail!("{} already holds the pipeline \"{}\"", data.display(), r.name);
+            }
+            list.push(PipelineRef { name: name.to_string(), data: data.clone() });
+            sync_pipelines(&list)?;
+            data
+        };
+        self.open(&cur.layout.repo, Some(&data), Some(&cur.layout.main)).await
+    }
+
+    /// Renames the pipeline of `cur` (its folder stays where it is).
+    pub async fn rename_pipeline(&self, cur: &Arc<App>, name: &str) -> Result<()> {
+        let _guard = self.switching.lock().await;
+        let data = &cur.layout.data;
+        let mut list = pipelines(&cur.layout.repo, data).pipelines;
+        let name = check_name(name, &list, Some(data.as_path()))?;
+        for r in list.iter_mut().filter(|r| &r.data == data) {
+            r.name = name.to_string();
+        }
+        sync_pipelines(&list)?;
+        // Every tab's dropdown shows the new name.
+        let _ = self.events.send(Envelope::global(UiEvent::Pipeline));
+        Ok(())
     }
 }
 
