@@ -17,7 +17,7 @@ const S = {
   pipelines: [], // [{ name, data, missing }] from <data>/pipelines.json
   items: new Map(),
   insp: null, // { id, run, tab, data, file }
-  account: null, // { limits, pause_above, paused }
+  account: null, // { limits, pause_above, paused, manual_paused, hold }
   page: "board",
   renaming: null, // step id whose header name is being edited
 };
@@ -138,6 +138,53 @@ function renderPlan() {
     S.account?.paused ? `New runs paused: ${S.account.paused}` : null,
     "Click for details",
   ].filter(Boolean).join("\n");
+  renderPause();
+}
+
+/// Toolbar toggle for picking up queued items. `hold` is set by the server
+/// after the human stops an item: only that item may start until they close
+/// its details and decide whether the queue goes on.
+function renderPause() {
+  const el = $("#pause");
+  const manual = !!S.account?.manual_paused;
+  const hold = !manual && S.account?.hold;
+  el.classList.toggle("on", manual);
+  el.classList.toggle("hold", !!hold);
+  el.textContent = manual ? "⏸ Paused" : hold ? "⏸ Holding" : "⏸";
+  el.title = manual
+    ? "Paused: no new work items are picked up. Running items keep running and queued items stay queued.\nClick to resume."
+    : hold
+      ? `You stopped ${hold}: only it may start new runs until you close its details.\nClick to let the queue go on.`
+      : "Pause new runs: queued items stay queued, running items keep running";
+}
+
+async function setPaused(paused) {
+  S.account = await api("PUT", "/api/pause", { paused });
+  renderPlan();
+}
+
+/// The human closed the details of an item. If that item was stopped (and so
+/// holds back the queue), ask whether the next queued items may start.
+function detailsClosed(id) {
+  if (!id || S.account?.hold !== id || S.account?.manual_paused) return;
+  const waiting = [...S.items.values()].some((i) => i.id !== id && (i.status === "queued" || i.status === "awaiting_approval"));
+  if (!waiting) {
+    act(() => setPaused(false));
+    return;
+  }
+  let yes = false;
+  dialog("Start the next work items?", [
+    h("p", {}, `You stopped ${id}. Should the next queued work items start running now?`),
+    h("p", { class: "muted" }, "No pauses new runs (the toolbar shows Paused) until you resume them."),
+  ], async () => {
+    yes = true;
+    await setPaused(false);
+  }, "Yes", false, "No");
+  // Cancel, Escape or "No": keep the queue paused.
+  $("#dialog").onclose = () => {
+    $("#dialog").onclose = null;
+    if (!yes) act(() => setPaused(true));
+  };
 }
 
 function fmtDuration(run) {
@@ -540,6 +587,8 @@ function isLiveLatest(item, n) {
 /// the chosen run is the live latest one; a pinned (ended or older) run stays put.
 async function openInspector(id, run, follow) {
   run = run ?? null;
+  const prev = S.insp?.id;
+  if (prev && prev !== id) setTimeout(() => detailsClosed(prev));
   follow = follow ?? isLiveLatest(S.items.get(id), run);
   S.insp = { id, run, follow, tab: S.insp?.tab || "transcript", data: null, file: null };
   $("#inspector").hidden = false;
@@ -549,6 +598,13 @@ async function openInspector(id, run, follow) {
 function closeInspector() {
   S.insp = null;
   $("#inspector").hidden = true;
+}
+
+/// Closing the details by the human (button, Escape, leaving the board).
+function closeInspectorByUser() {
+  const id = S.insp?.id;
+  closeInspector();
+  detailsClosed(id);
 }
 
 async function loadRun() {
@@ -867,8 +923,9 @@ async function renderDiff(body) {
 // ---- Dialogs -------------------------------------------------------------
 
 /// Opens the shared dialog; `onOk` returns false/throws to keep it open.
-function dialog(title, content, onOk, okLabel = "Save", wide = false) {
+function dialog(title, content, onOk, okLabel = "Save", wide = false, cancelLabel = "Cancel") {
   const dlg = $("#dialog");
+  $("#dialog-cancel").textContent = cancelLabel;
   dlg.classList.toggle("wide", wide);
   $("#dialog-title").textContent = title;
   $("#dialog-body").replaceChildren(...content);
@@ -1323,7 +1380,7 @@ function showPage(page) {
   $("#board-page").hidden = page !== "board";
   $("#resources-page").hidden = page !== "resources";
   for (const b of document.querySelectorAll("#pages button")) b.classList.toggle("active", b.dataset.page === page);
-  if (page !== "board") closeInspector();
+  if (page !== "board") closeInspectorByUser();
   if (location.hash !== (page === "board" ? "" : `#${page}`)) history.replaceState(null, "", `${location.pathname}${location.search}${page === "board" ? "" : `#${page}`}`);
   if (page === "resources") startResources();
   else stopResources();
@@ -1337,7 +1394,8 @@ $("#repo").onclick = workspaceDialog;
 $("#pipeline-select").onchange = onPipelineSelect;
 $("#btn-open-repo").onclick = workspaceDialog;
 $("#dialog-cancel").onclick = () => $("#dialog").close();
-$("#insp-close").onclick = closeInspector;
+$("#insp-close").onclick = closeInspectorByUser;
+$("#pause").onclick = () => act(() => setPaused(!(S.account?.manual_paused || S.account?.hold)));
 
 // Inspector width: drag the left edge to resize; the width is kept in localStorage.
 const INSP_WIDTH_KEY = "claudechain-inspector-width";
@@ -1436,7 +1494,7 @@ function restartItem(id) {
 $("#insp-remove").onclick = () => removeItem(S.insp.id);
 $("#composer").onsubmit = (e) => e.preventDefault();
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && S.insp && !$("#dialog").open) closeInspector();
+  if (e.key === "Escape" && S.insp && !$("#dialog").open) closeInspectorByUser();
 });
 // Keep the time labels on the board current (live clocks tick every second).
 setInterval(tickAgoLabels, 1000);
