@@ -1,4 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 40">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-12 -32 104 104">
+  <!-- Dark rounded tile so the light strokes are visible on light browser tabs. -->
   <defs>
     <polygon points="11.5,6 39.5,6 45.5,12 45.5,28 39.5,34 11.5,34 5.5,28 5.5,12" id="a"/>
     <polygon points="40.5,6 68.5,6 74.5,12 74.5,28 68.5,34 40.5,34 34.5,28 34.5,12" id="b"/>
@@ -15,6 +16,7 @@
       <use href="#b" fill="none" stroke="#000" stroke-width="13" clip-path="url(#bottom)"/>
     </mask>
   </defs>
+  <rect x="-12" y="-32" width="104" height="104" rx="20" fill="#1f2328"/>
   <g fill="none" stroke-width="8">
     <use href="#a" stroke="#e4e7eb" mask="url(#a-under)"/>
     <use href="#b" stroke="#e4e7eb" mask="url(#b-under)"/>
