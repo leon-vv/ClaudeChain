@@ -410,7 +410,7 @@ table.data .num { text-align: right; font-variant-numeric: tabular-nums; white-s
   .tables { grid-template-columns: 1fr; }
 }
 
-.pl-general { margin-bottom: 12px; }
+.pl-general { margin-bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
 
 /* "Choose default stage" popup in the pipeline editor */
 dialog.preset-picker { width: min(560px, 92vw); }
@@ -433,3 +433,8 @@ dialog.preset-picker { width: min(560px, 92vw); }
 .pl-conflicts { margin-bottom: 12px; display: flex; flex-direction: column; gap: 4px; }
 .pl-conflicts-title { font-weight: 600; }
 .pl-conflicts-title .help { font-weight: normal; }
+dialog.generator textarea, dialog.generator select { width: 100%; box-sizing: border-box; margin-bottom: 8px; }
+dialog.generator .preset-actions { gap: 8px; }
+.gen-prompt { margin-top: 8px; }
+.gen-prompt summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+.gen-prompt textarea { width: 100%; box-sizing: border-box; margin-top: 6px; font-family: var(--mono); font-size: 12px; }

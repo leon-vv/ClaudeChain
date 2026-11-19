@@ -51,7 +51,7 @@ async function api(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { code: data.code });
   return data;
 }
 
@@ -311,9 +311,21 @@ function setRepoId(id) {
 }
 
 /// Opens a repository on the server and switches this tab to it. Other tabs
-/// keep showing theirs.
+/// keep showing theirs. If the folder is not a git repository yet, or has no
+/// commits, asks the user and retries with `init` (git init / empty first commit).
 async function openRepo(body) {
-  const { id } = await api("POST", "/api/workspace", body);
+  let res;
+  try {
+    res = await api("POST", "/api/workspace", body);
+  } catch (err) {
+    const ask = {
+      not_repo: `${err.message}.\n\nRun "git init" there and create an empty first commit so ClaudeChain can use it?`,
+      no_commits: `${err.message}.\n\nClaudeChain needs at least one commit to create worktrees from. Create an empty "Initial commit" now?`,
+    }[err.code];
+    if (!ask || !confirm(ask)) throw err;
+    res = await api("POST", "/api/workspace", { ...body, init: true });
+  }
+  const { id } = res;
   if (id !== S.repoId) {
     closeInspector();
     setRepoId(id);
@@ -1245,6 +1257,45 @@ function presetPicker(onPick) {
   dlg.showModal();
 }
 
+// Small modal on top of the pipeline dialog: the user describes a pipeline and picks a
+// model; Claude returns the steps (with a prompt each). Calls onDone(generated).
+function generatorDialog(models, onDone) {
+  const ta = h("textarea", { rows: 5, placeholder: "e.g. Create an electronics pipeline: requirements, schematic design, part selection, PCB layout review and ordering after my approval" });
+  const preferred = models.find((m) => m.includes("opus")) ?? models[0];
+  const sel = h("select", {}, models.map((m) => h("option", { value: m, selected: m === preferred }, m)));
+  const err = h("p", { class: "error" });
+  const go = h("button", { class: "primary" }, "Generate");
+  const cancel = h("button", { onclick: () => dlg.close() }, "Cancel");
+  const dlg = h("dialog", { class: "preset-picker generator" },
+    h("h2", {}, "Generate pipeline using prompt"),
+    h("p", { class: "help" }, "Describe the pipeline you want. The model picks the stages, workers, approvals, permissions, tools, models and a prompt for each stage. The result replaces all steps in the editor; nothing is saved until you click “Save pipeline”, which then also writes each step’s prompt (replacing an existing prompt of a step with the same id)."),
+    h("label", {}, "Prompt"), ta,
+    h("label", {}, "Model used to generate"), sel,
+    err,
+    h("div", { class: "preset-actions" }, cancel, go),
+  );
+  go.onclick = async () => {
+    err.textContent = "";
+    go.disabled = ta.disabled = sel.disabled = true;
+    go.textContent = "Generating… (can take a minute)";
+    try {
+      const g = await api("POST", "/api/pipeline/generate", { prompt: ta.value, model: sel.value, models });
+      if (!dlg.open) return;
+      dlg.close();
+      onDone(g);
+    } catch (e) {
+      err.textContent = e.message;
+    } finally {
+      go.disabled = ta.disabled = sel.disabled = false;
+      go.textContent = "Generate";
+    }
+  };
+  dlg.addEventListener("close", () => dlg.remove());
+  document.body.append(dlg);
+  dlg.showModal();
+  ta.focus();
+}
+
 function pipelineDialog() {
   const draft = structuredClone({
     max_iterations: S.pipeline.max_iterations,
@@ -1355,6 +1406,10 @@ function pipelineDialog() {
           }),
         ),
       ),
+      step._prompt != null ? h("details", { class: "gen-prompt" },
+        h("summary", {}, "Generated prompt (written to the step’s prompt file on save)"),
+        (() => { const ta = h("textarea", { rows: 10 }); ta.value = step._prompt; ta.oninput = () => (step._prompt = ta.value); return ta; })(),
+      ) : "",
     );
   };
 
@@ -1367,6 +1422,25 @@ function pipelineDialog() {
           title: "Edit the general prompt shared by every step (closes this dialog; unsaved pipeline changes are lost)",
           onclick: () => editPrompt("general", "General prompt"),
         }, "General prompt…"),
+        h("button", {
+          type: "button",
+          title: "Download the saved pipeline (steps, settings and all prompts) as one file to share",
+          onclick: () => act(exportPipeline),
+        }, "Export…"),
+        h("button", {
+          type: "button",
+          title: "Replace the pipeline and all prompts with a shared pipeline file",
+          onclick: () => act(importPipeline),
+        }, "Import…"),
+        h("button", {
+          type: "button",
+          title: "Let a model build the whole pipeline from a description (you review it before saving)",
+          onclick: () => generatorDialog(draft.models, (g) => {
+            draft.max_iterations = g.max_iterations;
+            draft.steps = g.steps.map(({ prompt, ...s }) => ({ ...s, effort: s.effort ?? null, _new: true, _idEdited: true, _prompt: prompt || null }));
+            render();
+          }),
+        }, "Generate pipeline using prompt…"),
       ),
       h("div", { class: "pl-settings" },
         h("div", {}, h("label", {}, "Max backward moves per item"),
@@ -1408,11 +1482,46 @@ function pipelineDialog() {
     $("#dialog-body").scrollTop = scroll;
   }
 
-  dialog("Pipeline", [body], () => {
-    const steps = draft.steps.map(({ _new, _idEdited, ...s }) => s);
-    return api("PUT", "/api/pipeline", { ...draft, steps });
+  dialog("Pipeline", [body], async () => {
+    const steps = draft.steps.map(({ _new, _idEdited, _prompt, ...s }) => s);
+    await api("PUT", "/api/pipeline", { ...draft, steps });
+    // Prompts of generated steps: the steps exist now, so the prompt endpoint accepts them.
+    for (const s of draft.steps) {
+      if (s._prompt) await api("PUT", `/api/prompts/${s.id}`, { text: s._prompt });
+    }
   }, "Save pipeline", true);
   render();
+}
+
+/// Downloads the saved pipeline with all prompts as a shareable TOML file.
+async function exportPipeline() {
+  const { text } = await api("GET", "/api/pipeline/export");
+  const url = URL.createObjectURL(new Blob([text], { type: "application/toml" }));
+  const a = h("a", { href: url, download: "pipeline.claudechain.toml" });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/// Picks a pipeline file, shows what it will run with, then replaces the pipeline.
+function importPipeline() {
+  const input = h("input", { type: "file", accept: ".toml,text/plain" });
+  input.onchange = () => act(async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    const { steps } = await api("POST", "/api/pipeline/import", { text, dry_run: true });
+    const summary = steps.map((s) => `• ${s.name} (${s.id}): ${s.model}, permissions ${s.permission_mode}, tools ${s.tools.join(", ")}`).join("\n");
+    const ok = confirm(
+      `Import pipeline from ${file.name}?\n\nThis replaces the current pipeline and ALL prompts (unsaved changes in the editor are lost). ` +
+      `Agents will run with these tools and permissions, so only import files you trust:\n\n${summary}`);
+    if (!ok) return;
+    await api("POST", "/api/pipeline/import", { text });
+    $("#dialog").close();
+    toast("Pipeline imported");
+  });
+  input.click();
 }
 
 function moveDialog(item, back = false) {

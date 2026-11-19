@@ -18,6 +18,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::config;
+use crate::generate;
 use crate::git;
 use crate::orchestrator::{self, App, MessageMode};
 use crate::store::Layout;
@@ -64,7 +65,12 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (StatusCode::BAD_REQUEST, Json(json!({"error": format!("{:#}", self.0)}))).into_response()
+        let mut body = json!({"error": format!("{:#}", self.0)});
+        // Lets the UI offer to fix a folder that needs `git init` or a first commit.
+        if let Some(setup) = self.0.downcast_ref::<workspace::RepoSetup>() {
+            body["code"] = json!(setup.code());
+        }
+        (StatusCode::BAD_REQUEST, Json(body)).into_response()
     }
 }
 
@@ -88,6 +94,9 @@ pub fn router(ws: Ws, allowed_hosts: Vec<String>) -> Router {
         .route("/api/pause", put(put_pause))
         .route("/api/limits/refresh", post(refresh_limits))
         .route("/api/pipeline", put(put_pipeline))
+        .route("/api/pipeline/export", get(export_pipeline))
+        .route("/api/pipeline/import", post(import_pipeline))
+        .route("/api/pipeline/generate", post(generate_pipeline))
         .route("/api/settings", put(put_settings))
         .route("/api/steps/{step}", put(put_step))
         .route("/api/prompts/{id}", get(get_prompt).put(put_prompt))
@@ -205,11 +214,14 @@ struct OpenWorkspace {
     repo: String,
     data: Option<String>,
     main: Option<String>,
+    /// Run `git init` / create an empty first commit if needed (user confirmed).
+    #[serde(default)]
+    init: bool,
 }
 
 async fn open_workspace(State(ws): State<Ws>, Json(o): Json<OpenWorkspace>) -> ApiResult<Json<Value>> {
     let data = o.data.as_deref().map(str::trim).filter(|d| !d.is_empty()).map(FsPath::new);
-    let id = ws.open(FsPath::new(o.repo.trim()), data, o.main.as_deref()).await?;
+    let id = ws.open(FsPath::new(o.repo.trim()), data, o.main.as_deref(), o.init).await?;
     Ok(Json(json!({ "id": id })))
 }
 
@@ -314,6 +326,50 @@ async fn put_pause(State(ws): State<Ws>, Json(p): Json<PauseSettings>) -> ApiRes
 async fn put_pipeline(Cur(app): Cur, Json(p): Json<config::Pipeline>) -> ApiResult<Json<Value>> {
     app.replace_pipeline(p)?;
     Ok(Json(json!({})))
+}
+
+async fn export_pipeline(Cur(app): Cur) -> ApiResult<Json<Value>> {
+    let text = config::export_bundle(&app.layout.data, &app.pipeline())?;
+    Ok(Json(json!({"text": text})))
+}
+
+#[derive(Deserialize)]
+struct ImportRequest {
+    text: String,
+    /// Only parse and validate; return a summary without changing anything.
+    #[serde(default)]
+    dry_run: bool,
+}
+
+async fn import_pipeline(Cur(app): Cur, Json(r): Json<ImportRequest>) -> ApiResult<Json<Value>> {
+    let bundle = config::parse_bundle(&r.text)?;
+    let steps: Vec<Value> = bundle
+        .pipeline
+        .steps
+        .iter()
+        .map(|s| json!({"id": s.id, "name": s.name, "model": s.model, "tools": s.tools, "permission_mode": s.permission_mode}))
+        .collect();
+    if !r.dry_run {
+        app.import_pipeline(bundle)?;
+    }
+    Ok(Json(json!({"steps": steps})))
+}
+
+#[derive(Deserialize)]
+struct GenerateRequest {
+    prompt: String,
+    model: String,
+    /// Models the generated steps may use (the editor's list); defaults to
+    /// the pipeline's.
+    #[serde(default)]
+    models: Option<Vec<String>>,
+}
+
+/// Asks Claude for a pipeline draft; nothing is saved here.
+async fn generate_pipeline(Cur(app): Cur, Json(r): Json<GenerateRequest>) -> ApiResult<Json<Value>> {
+    let models = r.models.filter(|m| !m.is_empty()).unwrap_or_else(|| app.pipeline().models);
+    let g = generate::generate(&app.claude, &app.layout.repo, &r.model, &r.prompt, &models).await?;
+    Ok(Json(json!(g)))
 }
 
 #[derive(Deserialize)]

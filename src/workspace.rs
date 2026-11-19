@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -216,7 +216,7 @@ impl Workspace {
             return Ok(None);
         };
         let main = Some(r.main.as_str()).filter(|m| !m.is_empty());
-        self.open(&r.repo, Some(&r.data), main).await?;
+        self.open(&r.repo, Some(&r.data), main, false).await?;
         Ok(self.app(Some(id)))
     }
 
@@ -246,10 +246,14 @@ impl Workspace {
     /// Without `main`, the branch remembered for this repository is used,
     /// else the one git suggests.
     ///
+    /// With `init`, a folder that is not a repository gets `git init`, and a
+    /// repository without commits gets an empty first commit. Without it those
+    /// cases fail with a [`RepoSetup`] error so the UI can ask the user.
+    ///
     /// The other pipelines listed in the data directory's `pipelines.json`
     /// are opened too (in the background), so their queued items progress.
-    pub async fn open(&self, repo: &Path, data: Option<&Path>, main: Option<&str>) -> Result<String> {
-        let id = self.open_one(repo, data, main, false).await?;
+    pub async fn open(&self, repo: &Path, data: Option<&Path>, main: Option<&str>, init: bool) -> Result<String> {
+        let id = self.open_one(repo, data, main, false, init).await?;
         if let Some(app) = self.app(Some(&id)) {
             self.open_siblings(&app).await;
         }
@@ -260,7 +264,7 @@ impl Workspace {
         for r in pipelines(&app.layout.repo, &app.layout.data).pipelines {
             if r.data != app.layout.data
                 && r.data.is_dir()
-                && let Err(e) = self.open_one(&app.layout.repo, Some(&r.data), Some(&app.layout.main), true).await
+                && let Err(e) = self.open_one(&app.layout.repo, Some(&r.data), Some(&app.layout.main), true, false).await
             {
                 tracing::warn!("could not start pipeline {} ({}): {e:#}", r.name, r.data.display());
             }
@@ -268,13 +272,36 @@ impl Workspace {
     }
 
     /// Opens one repository + data directory. A `background` one (a sibling
-    /// pipeline) isn't made the default or remembered as recent.
-    async fn open_one(&self, repo: &Path, data: Option<&Path>, main: Option<&str>, background: bool) -> Result<String> {
+    /// pipeline) isn't made the default or remembered as recent. See
+    /// [`Workspace::open`] for `init`.
+    async fn open_one(
+        &self,
+        repo: &Path,
+        data: Option<&Path>,
+        main: Option<&str>,
+        background: bool,
+        init: bool,
+    ) -> Result<String> {
         let _guard = self.switching.lock().await;
         let repo = std::fs::canonicalize(repo).with_context(|| format!("{} does not exist", repo.display()))?;
-        git::check_repo(&repo)
-            .await
-            .map_err(|_| anyhow!("{} is not a git repository", repo.display()))?;
+        if git::check_repo(&repo).await.is_err() {
+            if !init {
+                return Err(RepoSetup::NotRepo(repo).into());
+            }
+            git::init(&repo).await.with_context(|| format!("git init in {}", repo.display()))?;
+            tracing::info!("ran git init in {}", repo.display());
+        }
+        // Right after `git init` HEAD names a branch that doesn't exist yet,
+        // so the main-branch check below would fail with a confusing error.
+        if !git::has_commits(&repo).await? {
+            if !init {
+                return Err(RepoSetup::NoCommits(repo).into());
+            }
+            git::initial_commit(&repo)
+                .await
+                .with_context(|| format!("creating the first commit in {}", repo.display()))?;
+            tracing::info!("created an empty first commit in {}", repo.display());
+        }
         let main = match main.map(str::trim).filter(|m| !m.is_empty()) {
             Some(m) => m.to_string(),
             None => match self.recent().into_iter().find(|r| r.repo == repo && !r.main.is_empty()) {
@@ -354,7 +381,7 @@ impl Workspace {
             sync_pipelines(&list)?;
             data
         };
-        self.open(&cur.layout.repo, Some(&data), Some(&cur.layout.main)).await
+        self.open(&cur.layout.repo, Some(&data), Some(&cur.layout.main), false).await
     }
 
     /// Renames the pipeline of `cur` (its folder stays where it is).
@@ -372,6 +399,34 @@ impl Workspace {
         Ok(())
     }
 }
+
+/// A folder that needs setup before ClaudeChain can use it. The web API turns
+/// this into an error `code` so the UI can offer to fix it.
+#[derive(Debug)]
+pub enum RepoSetup {
+    NotRepo(PathBuf),
+    NoCommits(PathBuf),
+}
+
+impl RepoSetup {
+    pub fn code(&self) -> &'static str {
+        match self {
+            RepoSetup::NotRepo(_) => "not_repo",
+            RepoSetup::NoCommits(_) => "no_commits",
+        }
+    }
+}
+
+impl std::fmt::Display for RepoSetup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RepoSetup::NotRepo(p) => write!(f, "{} is not a git repository", p.display()),
+            RepoSetup::NoCommits(p) => write!(f, "{} has no commits yet", p.display()),
+        }
+    }
+}
+
+impl std::error::Error for RepoSetup {}
 
 #[derive(Debug, Serialize)]
 pub struct DirEntry {

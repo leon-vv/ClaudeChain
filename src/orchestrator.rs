@@ -616,7 +616,24 @@ impl App {
 
     /// Replaces the whole pipeline (steps, transitions, settings) from the UI.
     pub fn replace_pipeline(&self, next: Pipeline) -> Result<()> {
+        self.replace_pipeline_with_prompts(next, None, &[])
+    }
+
+    /// Replaces the pipeline and its prompts from a shared pipeline file.
+    pub fn import_pipeline(&self, bundle: config::Bundle) -> Result<()> {
+        self.replace_pipeline_with_prompts(bundle.pipeline, bundle.general_prompt.as_deref(), &bundle.prompts)
+    }
+
+    /// Validates `next`, checks no unfinished item loses its step, then writes
+    /// the given prompts (stubs for steps without a prompt file) and swaps the
+    /// pipeline in. Nothing is written when a check fails.
+    fn replace_pipeline_with_prompts(&self, next: Pipeline, general: Option<&str>, prompts: &[(String, String)]) -> Result<()> {
         next.validate()?;
+        for (id, _) in prompts {
+            if next.step(id).is_none() {
+                bail!("prompt for unknown step '{id}'");
+            }
+        }
         {
             // Every unfinished item must still have a step to be in.
             let items = self.items.lock().unwrap();
@@ -628,6 +645,12 @@ impl App {
             if !orphans.is_empty() {
                 bail!("these items are in a step you removed; move them first: {}", orphans.join(", "));
             }
+        }
+        if let Some(text) = general {
+            config::write_prompt(&self.layout.data, "general", text)?;
+        }
+        for (id, text) in prompts {
+            config::write_prompt(&self.layout.data, id, text)?;
         }
         for step in &next.steps {
             if !config::prompt_path(&self.layout.data, &step.id).exists() {
