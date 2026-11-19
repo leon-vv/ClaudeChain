@@ -1144,6 +1144,16 @@ function pipelineDialog() {
           title: "Edit the general prompt shared by every step (closes this dialog; unsaved pipeline changes are lost)",
           onclick: () => editPrompt("general", "General prompt"),
         }, "General prompt…"),
+        h("button", {
+          type: "button",
+          title: "Download the saved pipeline (steps, settings and all prompts) as one file to share",
+          onclick: () => act(exportPipeline),
+        }, "Export…"),
+        h("button", {
+          type: "button",
+          title: "Replace the pipeline and all prompts with a shared pipeline file",
+          onclick: () => act(importPipeline),
+        }, "Import…"),
       ),
       h("div", { class: "pl-settings" },
         h("div", {}, h("label", {}, "Max backward moves per item"),
@@ -1173,6 +1183,37 @@ function pipelineDialog() {
     return api("PUT", "/api/pipeline", { ...draft, steps });
   }, "Save pipeline", true);
   render();
+}
+
+/// Downloads the saved pipeline with all prompts as a shareable TOML file.
+async function exportPipeline() {
+  const { text } = await api("GET", "/api/pipeline/export");
+  const url = URL.createObjectURL(new Blob([text], { type: "application/toml" }));
+  const a = h("a", { href: url, download: "pipeline.claudechain.toml" });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/// Picks a pipeline file, shows what it will run with, then replaces the pipeline.
+function importPipeline() {
+  const input = h("input", { type: "file", accept: ".toml,text/plain" });
+  input.onchange = () => act(async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    const { steps } = await api("POST", "/api/pipeline/import", { text, dry_run: true });
+    const summary = steps.map((s) => `• ${s.name} (${s.id}): ${s.model}, permissions ${s.permission_mode}, tools ${s.tools.join(", ")}`).join("\n");
+    const ok = confirm(
+      `Import pipeline from ${file.name}?\n\nThis replaces the current pipeline and ALL prompts (unsaved changes in the editor are lost). ` +
+      `Agents will run with these tools and permissions, so only import files you trust:\n\n${summary}`);
+    if (!ok) return;
+    await api("POST", "/api/pipeline/import", { text });
+    $("#dialog").close();
+    toast("Pipeline imported");
+  });
+  input.click();
 }
 
 function moveDialog(item, back = false) {

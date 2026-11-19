@@ -64,6 +64,8 @@ pub fn router(ws: Ws, allowed_hosts: Vec<String>) -> Router {
         .route("/api/resources", get(resources))
         .route("/api/limits", put(put_limits))
         .route("/api/pipeline", put(put_pipeline))
+        .route("/api/pipeline/export", get(export_pipeline))
+        .route("/api/pipeline/import", post(import_pipeline))
         .route("/api/settings", put(put_settings))
         .route("/api/steps/{step}", put(put_step))
         .route("/api/prompts/{id}", get(get_prompt).put(put_prompt))
@@ -206,6 +208,33 @@ async fn put_limits(State(ws): State<Ws>, Json(l): Json<LimitSettings>) -> ApiRe
 async fn put_pipeline(Cur(app): Cur, Json(p): Json<config::Pipeline>) -> ApiResult<Json<Value>> {
     app.replace_pipeline(p)?;
     Ok(Json(json!({})))
+}
+
+async fn export_pipeline(Cur(app): Cur) -> ApiResult<Json<Value>> {
+    let text = config::export_bundle(&app.layout.data, &app.pipeline())?;
+    Ok(Json(json!({"text": text})))
+}
+
+#[derive(Deserialize)]
+struct ImportRequest {
+    text: String,
+    /// Only parse and validate; return a summary without changing anything.
+    #[serde(default)]
+    dry_run: bool,
+}
+
+async fn import_pipeline(Cur(app): Cur, Json(r): Json<ImportRequest>) -> ApiResult<Json<Value>> {
+    let bundle = config::parse_bundle(&r.text)?;
+    let steps: Vec<Value> = bundle
+        .pipeline
+        .steps
+        .iter()
+        .map(|s| json!({"id": s.id, "name": s.name, "model": s.model, "tools": s.tools, "permission_mode": s.permission_mode}))
+        .collect();
+    if !r.dry_run {
+        app.import_pipeline(bundle)?;
+    }
+    Ok(Json(json!({"steps": steps})))
 }
 
 #[derive(Deserialize)]

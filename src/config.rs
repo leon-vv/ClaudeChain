@@ -178,6 +178,84 @@ pub fn write_prompt(data: &Path, id: &str, text: &str) -> Result<()> {
     write_atomic(&prompt_path(data, id), text.as_bytes())
 }
 
+/// Version of the shareable pipeline file written by [`export_bundle`].
+pub const BUNDLE_FORMAT_VERSION: i64 = 1;
+
+/// A pipeline together with all of its prompts, as read from a shared file.
+#[derive(Debug, Clone)]
+pub struct Bundle {
+    pub pipeline: Pipeline,
+    /// The general prompt, when the file has one.
+    pub general_prompt: Option<String>,
+    /// One prompt per step, in step order: (step id, text).
+    pub prompts: Vec<(String, String)>,
+}
+
+/// Writes the pipeline and all of its prompts as one self-contained TOML file
+/// that can be shared and imported with [`parse_bundle`]. Machine-local state
+/// (workspace path, items, usage limits) is not included.
+pub fn export_bundle(data: &Path, pipeline: &Pipeline) -> Result<String> {
+    let toml::Value::Table(mut table) = toml::Value::try_from(pipeline).context("serializing pipeline")? else {
+        bail!("pipeline did not serialize to a table");
+    };
+    table.insert("format_version".into(), toml::Value::Integer(BUNDLE_FORMAT_VERSION));
+    table.insert("general_prompt".into(), toml::Value::String(read_prompt(data, "general")));
+    if let Some(toml::Value::Array(steps)) = table.get_mut("step") {
+        for step in steps.iter_mut() {
+            if let toml::Value::Table(t) = step {
+                let id = t.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                t.insert("prompt".into(), toml::Value::String(read_prompt(data, &id)));
+            }
+        }
+    }
+    let body = toml::to_string_pretty(&table).context("writing pipeline file")?;
+    Ok(format!(
+        "# ClaudeChain pipeline: steps, settings and prompts.\n\
+         # Import it from the pipeline editor (Edit pipeline details… → Import…).\n\n{body}"
+    ))
+}
+
+/// Parses and validates a file written by [`export_bundle`]. Steps without a
+/// prompt get the starter prompt.
+pub fn parse_bundle(text: &str) -> Result<Bundle> {
+    let mut table: toml::Table = toml::from_str(text).context("parsing pipeline file")?;
+    match table.remove("format_version") {
+        None => bail!("not a ClaudeChain pipeline file: format_version is missing"),
+        Some(toml::Value::Integer(v)) if v == BUNDLE_FORMAT_VERSION => {}
+        Some(v) => bail!("unsupported pipeline file format_version {v} (this version reads {BUNDLE_FORMAT_VERSION})"),
+    }
+    let general_prompt = match table.remove("general_prompt") {
+        None => None,
+        Some(toml::Value::String(s)) => Some(s),
+        Some(_) => bail!("general_prompt must be a string"),
+    };
+    let mut step_prompts = vec![];
+    for key in ["step", "steps"] {
+        if let Some(toml::Value::Array(steps)) = table.get_mut(key) {
+            for step in steps.iter_mut() {
+                let prompt = match step {
+                    toml::Value::Table(t) => match t.remove("prompt") {
+                        None => None,
+                        Some(toml::Value::String(s)) => Some(s),
+                        Some(_) => bail!("step prompt must be a string"),
+                    },
+                    _ => None,
+                };
+                step_prompts.push(prompt);
+            }
+        }
+    }
+    let pipeline: Pipeline = toml::Value::Table(table).try_into().context("reading pipeline from file")?;
+    pipeline.validate()?;
+    let prompts = pipeline
+        .steps
+        .iter()
+        .zip(step_prompts.into_iter().chain(std::iter::repeat(None)))
+        .map(|(s, p)| (s.id.clone(), p.unwrap_or_else(|| stub_prompt(&s.name))))
+        .collect();
+    Ok(Bundle { pipeline, general_prompt, prompts })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +298,45 @@ mod tests {
 
         let p: Pipeline = toml::from_str(&text("effort = \"turbo\"\n")).unwrap();
         assert!(p.validate().is_err());
+    }
+
+    fn temp_data() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "claudechain-bundle-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn bundle_round_trips_default_pipeline_and_prompts() {
+        let data = temp_data();
+        let p = load_or_init(&data).unwrap();
+        write_prompt(&data, "triage", "Triage prompt with \"\"\" quotes\nand 'lines'\n").unwrap();
+        let text = export_bundle(&data, &p).unwrap();
+        let b = parse_bundle(&text).unwrap();
+        assert_eq!(toml::to_string(&b.pipeline).unwrap(), toml::to_string(&p).unwrap());
+        assert_eq!(b.general_prompt.as_deref(), Some(read_prompt(&data, "general").as_str()));
+        assert_eq!(b.prompts.len(), p.steps.len());
+        for (id, prompt) in &b.prompts {
+            assert_eq!(prompt, &read_prompt(&data, id), "prompt for {id}");
+        }
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn bundle_missing_prompt_gets_stub_and_bad_files_are_rejected() {
+        let ok = "format_version = 1\n[[step]]\nid = \"a\"\nname = \"A\"\nmodel = \"m\"\n\
+                  allowed_targets = [\"next\"]\ntools = [\"Write\"]\n";
+        let b = parse_bundle(ok).unwrap();
+        assert_eq!(b.general_prompt, None);
+        assert_eq!(b.prompts, vec![("a".to_string(), stub_prompt("A"))]);
+
+        assert!(parse_bundle(&ok.replace("format_version = 1\n", "")).is_err());
+        assert!(parse_bundle(&ok.replace("format_version = 1", "format_version = 2")).is_err());
+        assert!(parse_bundle(&ok.replace("\"a\"", "\"../x\"")).is_err());
+        assert!(parse_bundle("not toml [").is_err());
     }
 }
