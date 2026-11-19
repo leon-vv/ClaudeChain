@@ -40,10 +40,17 @@ struct Saved {
     /// Percentage of any plan window at which new runs are held back.
     #[serde(default)]
     pause_above: Option<f64>,
+    /// Set by the human from the toolbar: no new runs start until cleared.
+    #[serde(default)]
+    manual_pause: bool,
 }
 
 pub struct Account {
     saved: Mutex<Saved>,
+    /// After the human stops an item, only that item may start new runs until
+    /// they decide (on closing its details) whether the queue should go on.
+    /// Not persisted.
+    hold_for: Mutex<Option<String>>,
 }
 
 fn state_file() -> Option<PathBuf> {
@@ -67,7 +74,7 @@ impl Account {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
-        Arc::new(Self { saved: Mutex::new(saved) })
+        Arc::new(Self { saved: Mutex::new(saved), hold_for: Mutex::new(None) })
     }
 
     fn save(saved: &Saved) {
@@ -105,6 +112,14 @@ impl Account {
         changed
     }
 
+    /// Forgets the recorded usage, e.g. after the user reset their limit
+    /// outside ClaudeChain. The next agent run reports fresh values.
+    pub fn forget_limits(&self) {
+        let mut saved = self.saved.lock().unwrap();
+        saved.limits = None;
+        Self::save(&saved);
+    }
+
     pub fn pause_above(&self) -> Option<f64> {
         self.saved.lock().unwrap().pause_above
     }
@@ -113,6 +128,27 @@ impl Account {
         let mut saved = self.saved.lock().unwrap();
         saved.pause_above = value.filter(|v| *v > 0.0);
         Self::save(&saved);
+    }
+
+    pub fn manual_paused(&self) -> bool {
+        self.saved.lock().unwrap().manual_pause
+    }
+
+    pub fn set_manual_paused(&self, value: bool) {
+        let mut saved = self.saved.lock().unwrap();
+        if saved.manual_pause != value {
+            saved.manual_pause = value;
+            Self::save(&saved);
+        }
+    }
+
+    /// The item that alone may start runs, if the human just stopped one.
+    pub fn hold_for(&self) -> Option<String> {
+        self.hold_for.lock().unwrap().clone()
+    }
+
+    pub fn set_hold_for(&self, id: Option<String>) {
+        *self.hold_for.lock().unwrap() = id;
     }
 
     /// Why new runs should wait, if a plan window is exhausted or above the

@@ -129,7 +129,15 @@ function renderPlanCard() {
   if (pause && document.activeElement !== pause) pause.value = S.account?.pause_above ?? "";
   const windows = planWindows();
   const at = S.account?.limits?.at;
-  box.replaceChildren(card("Plan usage",
+  const refresh = h("button", { class: "small", title: "Forget the recorded usage and let queued runs start. Use this after resetting your limit on claude.ai; the next run reports fresh numbers." }, "Refresh");
+  refresh.onclick = () => act(async () => {
+    S.account = await api("POST", "/api/limits/refresh");
+    renderPlan();
+    renderPlanCard();
+    toast("Usage cleared; queued runs can start again");
+  });
+  box.replaceChildren(h("section", { class: "card" },
+    h("div", { class: "card-head" }, h("h2", {}, "Plan usage"), refresh),
     S.account?.paused ? h("div", { class: "banner warn" }, `⏸ New runs are paused: ${S.account.paused}`) : "",
     windows.length
       ? h("div", { class: "windows" }, windows.map((w) => h("div", { class: "window" },
@@ -235,14 +243,18 @@ function renderAgents() {
   const box = $("#res-agents");
   if (!box) return;
   const agents = R.sys?.agents || [];
-  const rows = agents.map(({ agent: a, usage: u }) => {
-    const item = S.items.get(a.item);
+  const rows = agents.map(({ agent: a, usage: u, data, pipeline }) => {
+    // Agents of other pipelines (or repositories) aren't on this board.
+    const own = !data || data === S.data;
+    const item = own ? S.items.get(a.item) : null;
     const run = item?.runs.find((r) => r.n === a.run);
     const t = run?.tokens;
     const ctx = t?.context && t?.context_window ? Math.round((t.context / t.context_window) * 100) : null;
     return [
-      h("a", { href: "#", onclick: (e) => { e.preventDefault(); showPage("board"); openInspector(a.item, a.run); } }, item?.title || a.item),
-      stepName(a.step),
+      own
+        ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); showPage("board"); openInspector(a.item, a.run); } }, item?.title || a.item)
+        : h("span", { title: data }, `[${pipeline}] ${a.title || a.item}`),
+      own ? stepName(a.step) : a.step,
       run ? shortModel(run.model) : "",
       run ? fmtSecs(runSecs(run)) : "",
       h("span", { title: tokTitle(t) }, t ? fmtTok(tokTotal(t)) : "–"),

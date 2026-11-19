@@ -18,6 +18,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::config;
+use crate::generate;
 use crate::git;
 use crate::orchestrator::{self, App, MessageMode};
 use crate::store::Layout;
@@ -25,13 +26,32 @@ use crate::workspace::{self, Workspace};
 
 type Ws = Arc<Workspace>;
 
-/// The app for the currently open repository; fails when none is open.
+/// Which open repository a request is about: the browser tab passes its id
+/// as `?repo=<id>`. Without it, the most recently opened one is used.
+#[derive(Deserialize, Default)]
+struct RepoQuery {
+    repo: Option<String>,
+}
+
+fn repo_param(parts: &Parts) -> Option<String> {
+    Query::<RepoQuery>::try_from_uri(&parts.uri)
+        .ok()
+        .and_then(|q| q.0.repo)
+        .filter(|r| !r.is_empty())
+}
+
+/// The app for the request's repository (see `RepoQuery`); fails when it
+/// isn't open.
 pub struct Cur(Arc<App>);
 
 impl FromRequestParts<Ws> for Cur {
     type Rejection = ApiError;
-    async fn from_request_parts(_: &mut Parts, ws: &Ws) -> Result<Self, ApiError> {
-        ws.app().map(Cur).ok_or_else(|| anyhow::anyhow!("no repository is open").into())
+    async fn from_request_parts(parts: &mut Parts, ws: &Ws) -> Result<Self, ApiError> {
+        let id = repo_param(parts);
+        ws.resolve(id.as_deref())
+            .await?
+            .map(Cur)
+            .ok_or_else(|| anyhow::anyhow!("this repository is not open").into())
     }
 }
 
@@ -57,15 +77,21 @@ pub fn router(ws: Ws, allowed_hosts: Vec<String>) -> Router {
         .route("/app.js", get(|| static_file("text/javascript", include_str!("../static/app.js"))))
         .route("/resources.js", get(|| static_file("text/javascript", include_str!("../static/resources.js"))))
         .route("/style.css", get(|| static_file("text/css", include_str!("../static/style.css"))))
+        .route("/favicon.svg", get(|| static_file("image/svg+xml", include_str!("../static/favicon.svg"))))
         .route("/api/state", get(state))
         .route("/api/events", get(events))
         .route("/api/workspace", post(open_workspace))
+        .route("/api/pipelines", post(add_pipeline))
+        .route("/api/pipelines/rename", post(rename_pipeline))
         .route("/api/fs", get(list_dir))
         .route("/api/resources", get(resources))
         .route("/api/limits", put(put_limits))
+        .route("/api/pause", put(put_pause))
+        .route("/api/limits/refresh", post(refresh_limits))
         .route("/api/pipeline", put(put_pipeline))
         .route("/api/pipeline/export", get(export_pipeline))
         .route("/api/pipeline/import", post(import_pipeline))
+        .route("/api/pipeline/generate", post(generate_pipeline))
         .route("/api/settings", put(put_settings))
         .route("/api/steps/{step}", put(put_step))
         .route("/api/prompts/{id}", get(get_prompt).put(put_prompt))
@@ -81,6 +107,7 @@ pub fn router(ws: Ws, allowed_hosts: Vec<String>) -> Router {
         .route("/api/items/{id}/files", get(list_files))
         .route("/api/items/{id}/file", get(get_file))
         .route("/api/items/{id}/diff", get(get_diff))
+        .route("/mcp", post(crate::mcp::handle))
         .layer(middleware::from_fn(move |req, next| guard(allowed_hosts.clone(), req, next)))
         .with_state(ws)
 }
@@ -107,11 +134,22 @@ async fn static_file(content_type: &'static str, body: &'static str) -> impl Int
     ([(header::CONTENT_TYPE, content_type), (header::CACHE_CONTROL, "no-cache")], body)
 }
 
-async fn state(State(ws): State<Ws>) -> Json<Value> {
+async fn state(State(ws): State<Ws>, Query(q): Query<RepoQuery>) -> Json<Value> {
+    let id = q.repo.filter(|r| !r.is_empty());
+    let app = match ws.resolve(id.as_deref()).await {
+        Ok(app) => app,
+        Err(e) => {
+            tracing::warn!("could not reopen repository {id:?}: {e:#}");
+            None
+        }
+    };
     let recent = ws.recent();
-    let Some(app) = ws.app() else {
+    let open = ws.open_repos();
+    let Some(app) = app else {
         return Json(json!({
+            "id": null,
             "repo": null,
+            "open": open,
             "recent": recent,
             "home": workspace::home_dir(),
             "account": orchestrator::account_json(&ws.account),
@@ -124,26 +162,43 @@ async fn state(State(ws): State<Ws>) -> Json<Value> {
         obj.insert("steps".into(), steps);
     }
     let items: Vec<_> = app.items.lock().unwrap().values().cloned().collect();
+    let known = workspace::pipelines(&app.layout.repo, &app.layout.data);
+    let live = ws.apps();
+    let pipelines: Vec<Value> = known
+        .pipelines
+        .iter()
+        .map(|p| {
+            let running = live.iter().find(|a| a.layout.repo == app.layout.repo && a.layout.data == p.data).map_or(0, |a| a.agents().len());
+            let id = workspace::repo_id(&app.layout.repo, &p.data);
+            json!({"id": id, "name": p.name, "data": p.data, "missing": !p.data.is_dir(), "running": running})
+        })
+        .collect();
     Json(json!({
+        "id": app.id,
         "repo": app.layout.repo,
         "data": app.layout.data,
         "main": app.layout.main,
         "default_data": workspace::default_data_dir(&app.layout.repo),
+        "open": open,
         "recent": recent,
         "home": workspace::home_dir(),
         "account": orchestrator::account_json(&ws.account),
         "pipeline": pipeline,
+        "pipeline_name": known.name,
+        "pipelines": pipelines,
         "items": items,
     }))
 }
 
-async fn events(State(ws): State<Ws>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream = BroadcastStream::new(ws.events.subscribe()).map(|msg| {
-        Ok(match msg {
-            Ok(ev) => Event::default().json_data(ev).unwrap_or_default(),
-            // The browser fell behind; it reloads the full state.
-            Err(BroadcastStreamRecvError::Lagged(_)) => Event::default().data(r#"{"kind":"resync"}"#),
-        })
+/// Live updates for one repository (`?repo=<id>`, else the default one)
+/// plus the events that concern every tab.
+async fn events(State(ws): State<Ws>, Query(q): Query<RepoQuery>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let id = q.repo.filter(|r| !r.is_empty()).or_else(|| ws.app(None).map(|a| a.id.clone()));
+    let stream = BroadcastStream::new(ws.events.subscribe()).filter_map(move |msg| match msg {
+        Ok(env) if env.is_for(id.as_deref()) => Some(Ok(Event::default().json_data(env.event).unwrap_or_default())),
+        Ok(_) => None,
+        // The browser fell behind; it reloads the full state.
+        Err(BroadcastStreamRecvError::Lagged(_)) => Some(Ok(Event::default().data(r#"{"kind":"resync"}"#))),
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
@@ -157,7 +212,28 @@ struct OpenWorkspace {
 
 async fn open_workspace(State(ws): State<Ws>, Json(o): Json<OpenWorkspace>) -> ApiResult<Json<Value>> {
     let data = o.data.as_deref().map(str::trim).filter(|d| !d.is_empty()).map(FsPath::new);
-    ws.open(FsPath::new(o.repo.trim()), data, o.main.as_deref()).await?;
+    let id = ws.open(FsPath::new(o.repo.trim()), data, o.main.as_deref()).await?;
+    Ok(Json(json!({ "id": id })))
+}
+
+#[derive(Deserialize)]
+struct AddPipeline {
+    name: String,
+    data: String,
+}
+
+async fn add_pipeline(Cur(app): Cur, State(ws): State<Ws>, Json(p): Json<AddPipeline>) -> ApiResult<Json<Value>> {
+    let id = ws.add_pipeline(&app, &p.name, FsPath::new(p.data.trim())).await?;
+    Ok(Json(json!({ "id": id })))
+}
+
+#[derive(Deserialize)]
+struct RenamePipeline {
+    name: String,
+}
+
+async fn rename_pipeline(Cur(app): Cur, State(ws): State<Ws>, Json(p): Json<RenamePipeline>) -> ApiResult<Json<Value>> {
+    ws.rename_pipeline(&app, &p.name).await?;
     Ok(Json(json!({})))
 }
 
@@ -173,18 +249,20 @@ async fn list_dir(Query(q): Query<DirQuery>) -> ApiResult<Json<Value>> {
     Ok(Json(json!(workspace::list_dir(&q.path, q.hidden)?)))
 }
 
-/// System load, history, and CPU/memory of each running agent's process tree.
-async fn resources(State(ws): State<Ws>) -> Json<Value> {
-    let agents: Vec<Value> = ws
-        .app()
-        .map(|app| app.agents())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|a| {
-            let usage = ws.monitor.tree(a.pid);
-            json!({"agent": a, "usage": usage})
-        })
-        .collect();
+/// System load, history, and CPU/memory of each running agent's process
+/// tree: the agents of every pipeline of the tab's repository (`data` and
+/// `pipeline` say which one; see `RepoQuery`).
+async fn resources(State(ws): State<Ws>, Query(q): Query<RepoQuery>) -> Json<Value> {
+    let mut agents: Vec<Value> = vec![];
+    if let Some(cur) = ws.app(q.repo.as_deref().filter(|r| !r.is_empty())) {
+        for app in ws.apps().into_iter().filter(|a| a.layout.repo == cur.layout.repo) {
+            let name = workspace::pipelines(&app.layout.repo, &app.layout.data).name;
+            for a in app.agents() {
+                let usage = ws.monitor.tree(a.pid);
+                agents.push(json!({"agent": a, "usage": usage, "data": app.layout.data, "pipeline": name}));
+            }
+        }
+    }
     Json(json!({
         "system": ws.monitor.latest(),
         "history": ws.monitor.history(),
@@ -201,7 +279,38 @@ struct LimitSettings {
 async fn put_limits(State(ws): State<Ws>, Json(l): Json<LimitSettings>) -> ApiResult<Json<Value>> {
     ws.account.set_pause_above(l.pause_above);
     let account = orchestrator::account_json(&ws.account);
-    let _ = ws.events.send(orchestrator::UiEvent::Limits { account: account.clone() });
+    let _ = ws.events.send(orchestrator::Envelope::global(orchestrator::UiEvent::Limits { account: account.clone() }));
+    Ok(Json(account))
+}
+
+/// Drops the recorded plan usage so runs held back by it start again.
+async fn refresh_limits(State(ws): State<Ws>) -> ApiResult<Json<Value>> {
+    ws.account.forget_limits();
+    let account = orchestrator::account_json(&ws.account);
+    let _ = ws.events.send(orchestrator::Envelope::global(orchestrator::UiEvent::Limits { account: account.clone() }));
+    // Plan limits are account-wide, so every open repository may resume.
+    for app in ws.apps() {
+        app.wake();
+    }
+    Ok(Json(account))
+}
+
+#[derive(Deserialize)]
+struct PauseSettings {
+    paused: bool,
+}
+
+/// Pauses or resumes picking up queued items. Also ends the hold that follows
+/// stopping an item, since the human has now decided how the queue goes on.
+async fn put_pause(State(ws): State<Ws>, Json(p): Json<PauseSettings>) -> ApiResult<Json<Value>> {
+    ws.account.set_manual_paused(p.paused);
+    ws.account.set_hold_for(None);
+    let account = orchestrator::account_json(&ws.account);
+    let _ = ws.events.send(orchestrator::Envelope::global(orchestrator::UiEvent::Limits { account: account.clone() }));
+    // Pausing is account-wide, so every open repository may resume.
+    for app in ws.apps() {
+        app.wake();
+    }
     Ok(Json(account))
 }
 
@@ -235,6 +344,23 @@ async fn import_pipeline(Cur(app): Cur, Json(r): Json<ImportRequest>) -> ApiResu
         app.import_pipeline(bundle)?;
     }
     Ok(Json(json!({"steps": steps})))
+}
+
+#[derive(Deserialize)]
+struct GenerateRequest {
+    prompt: String,
+    model: String,
+    /// Models the generated steps may use (the editor's list); defaults to
+    /// the pipeline's.
+    #[serde(default)]
+    models: Option<Vec<String>>,
+}
+
+/// Asks Claude for a pipeline draft; nothing is saved here.
+async fn generate_pipeline(Cur(app): Cur, Json(r): Json<GenerateRequest>) -> ApiResult<Json<Value>> {
+    let models = r.models.filter(|m| !m.is_empty()).unwrap_or_else(|| app.pipeline().models);
+    let g = generate::generate(&app.claude, &app.layout.repo, &r.model, &r.prompt, &models).await?;
+    Ok(Json(json!(g)))
 }
 
 #[derive(Deserialize)]
@@ -419,6 +545,12 @@ async fn restart(Cur(app): Cur, Path(id): Path<String>) -> ApiResult<Json<Value>
 
 async fn stop(Cur(app): Cur, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     app.stop(&id)?;
+    // Keep other queued items from taking the free slot while the human deals
+    // with the stopped one; released through `PUT /api/pause`.
+    if !app.account.manual_paused() {
+        app.account.set_hold_for(Some(id));
+        app.emit_account();
+    }
     Ok(Json(json!({})))
 }
 

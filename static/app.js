@@ -3,15 +3,21 @@
 // ---- State ---------------------------------------------------------------
 
 const S = {
+  // Id of the repository this tab looks at. It lives in the page URL
+  // (?repo=<id>), not in localStorage, so each tab can show another one.
+  repoId: new URLSearchParams(location.search).get("repo"),
+  es: null, // EventSource for repoId
   repo: null,
   data: null,
   defaultData: null,
   recent: [],
   home: "",
   pipeline: null,
+  pipelineName: null,
+  pipelines: [], // [{ name, data, missing }] from <data>/pipelines.json
   items: new Map(),
   insp: null, // { id, run, tab, data, file }
-  account: null, // { limits, pause_above, paused }
+  account: null, // { limits, pause_above, paused, manual_paused, hold }
   page: "board",
   renaming: null, // step id whose header name is being edited
 };
@@ -36,6 +42,8 @@ function h(tag, attrs = {}, ...children) {
 }
 
 async function api(method, path, body) {
+  // Every request is about this tab's repository (see web::RepoQuery).
+  if (S.repoId) path += `${path.includes("?") ? "&" : "?"}repo=${encodeURIComponent(S.repoId)}`;
   const res = await fetch(path, {
     method,
     // The server rejects changes without this header (see web::guard).
@@ -130,6 +138,53 @@ function renderPlan() {
     S.account?.paused ? `New runs paused: ${S.account.paused}` : null,
     "Click for details",
   ].filter(Boolean).join("\n");
+  renderPause();
+}
+
+/// Toolbar toggle for picking up queued items. `hold` is set by the server
+/// after the human stops an item: only that item may start until they close
+/// its details and decide whether the queue goes on.
+function renderPause() {
+  const el = $("#pause");
+  const manual = !!S.account?.manual_paused;
+  const hold = !manual && S.account?.hold;
+  el.classList.toggle("on", manual);
+  el.classList.toggle("hold", !!hold);
+  el.textContent = manual ? "⏸ Paused" : hold ? "⏸ Holding" : "⏸";
+  el.title = manual
+    ? "Paused: no new work items are picked up. Running items keep running and queued items stay queued.\nClick to resume."
+    : hold
+      ? `You stopped ${hold}: only it may start new runs until you close its details.\nClick to let the queue go on.`
+      : "Pause new runs: queued items stay queued, running items keep running";
+}
+
+async function setPaused(paused) {
+  S.account = await api("PUT", "/api/pause", { paused });
+  renderPlan();
+}
+
+/// The human closed the details of an item. If that item was stopped (and so
+/// holds back the queue), ask whether the next queued items may start.
+function detailsClosed(id) {
+  if (!id || S.account?.hold !== id || S.account?.manual_paused) return;
+  const waiting = [...S.items.values()].some((i) => i.id !== id && (i.status === "queued" || i.status === "awaiting_approval"));
+  if (!waiting) {
+    act(() => setPaused(false));
+    return;
+  }
+  let yes = false;
+  dialog("Start the next work items?", [
+    h("p", {}, `You stopped ${id}. Should the next queued work items start running now?`),
+    h("p", { class: "muted" }, "No pauses new runs (the toolbar shows Paused) until you resume them."),
+  ], async () => {
+    yes = true;
+    await setPaused(false);
+  }, "Yes", false, "No");
+  // Cancel, Escape or "No": keep the queue paused.
+  $("#dialog").onclose = () => {
+    $("#dialog").onclose = null;
+    if (!yes) act(() => setPaused(true));
+  };
 }
 
 function fmtDuration(run) {
@@ -184,6 +239,9 @@ const STATUS_LABEL = {
 
 async function load() {
   const st = await api("GET", "/api/state");
+  // A tab without a repository in its URL gets the default one; pin it so
+  // opening another repository elsewhere doesn't change this tab.
+  if (st.id && st.id !== S.repoId) setRepoId(st.id);
   S.repo = st.repo;
   S.data = st.data ?? null;
   S.defaultData = st.default_data ?? null;
@@ -191,7 +249,10 @@ async function load() {
   S.recent = st.recent || [];
   S.home = st.home;
   S.pipeline = st.pipeline ?? null;
+  S.pipelineName = st.pipeline_name ?? null;
+  S.pipelines = st.pipelines || [];
   S.account = st.account ?? null;
+  renderPipelineSelect();
   renderPlan();
   S.items = new Map((st.items || []).map((i) => [i.id, i]));
   // The folder name keeps the header on one line; the tooltip has the full path.
@@ -225,8 +286,7 @@ function renderLanding() {
           const btn = e.currentTarget;
           btn.disabled = true;
           try {
-            await api("POST", "/api/workspace", { repo: r.repo, data, main: r.main || null });
-            await load();
+            await openRepo({ repo: r.repo, data, main: r.main || null });
           } catch (err) {
             toast(err.message);
           } finally {
@@ -239,8 +299,31 @@ function renderLanding() {
   }));
 }
 
+/// Points this tab at repository `id`: the URL, the event stream and later API calls.
+function setRepoId(id) {
+  S.repoId = id;
+  const params = new URLSearchParams(location.search);
+  params.set("repo", id);
+  history.replaceState(null, "", `${location.pathname}?${params}${location.hash}`);
+  if (S.es?.repoId !== id) connect();
+}
+
+/// Opens a repository on the server and switches this tab to it. Other tabs
+/// keep showing theirs.
+async function openRepo(body) {
+  const { id } = await api("POST", "/api/workspace", body);
+  if (id !== S.repoId) {
+    closeInspector();
+    setRepoId(id);
+  }
+  await load();
+}
+
 function connect() {
-  const es = new EventSource("/api/events");
+  S.es?.close();
+  const es = new EventSource(S.repoId ? `/api/events?repo=${encodeURIComponent(S.repoId)}` : "/api/events");
+  es.repoId = S.repoId;
+  S.es = es;
   es.onopen = () => {
     $("#conn").classList.add("on");
     load();
@@ -265,7 +348,8 @@ function connect() {
         if (S.page === "resources") renderResources();
         break;
       case "workspace":
-        closeInspector();
+        // Some tab opened a repository; this tab keeps its own, but the
+        // recent list may have changed.
         load();
         break;
       case "pipeline":
@@ -503,6 +587,8 @@ function isLiveLatest(item, n) {
 /// the chosen run is the live latest one; a pinned (ended or older) run stays put.
 async function openInspector(id, run, follow) {
   run = run ?? null;
+  const prev = S.insp?.id;
+  if (prev && prev !== id) setTimeout(() => detailsClosed(prev));
   follow = follow ?? isLiveLatest(S.items.get(id), run);
   S.insp = { id, run, follow, tab: S.insp?.tab || "transcript", data: null, file: null };
   $("#inspector").hidden = false;
@@ -512,6 +598,13 @@ async function openInspector(id, run, follow) {
 function closeInspector() {
   S.insp = null;
   $("#inspector").hidden = true;
+}
+
+/// Closing the details by the human (button, Escape, leaving the board).
+function closeInspectorByUser() {
+  const id = S.insp?.id;
+  closeInspector();
+  detailsClosed(id);
 }
 
 async function loadRun() {
@@ -830,8 +923,9 @@ async function renderDiff(body) {
 // ---- Dialogs -------------------------------------------------------------
 
 /// Opens the shared dialog; `onOk` returns false/throws to keep it open.
-function dialog(title, content, onOk, okLabel = "Save", wide = false) {
+function dialog(title, content, onOk, okLabel = "Save", wide = false, cancelLabel = "Cancel") {
   const dlg = $("#dialog");
+  $("#dialog-cancel").textContent = cancelLabel;
   dlg.classList.toggle("wide", wide);
   $("#dialog-title").textContent = title;
   $("#dialog-body").replaceChildren(...content);
@@ -954,14 +1048,106 @@ function workspaceDialog() {
           r.repo, h("small", {}, `data: ${r.data}${r.main ? ` · main branch: ${r.main}` : ""}`)))))
     : "";
   dialog("Open repository", [
-    h("p", { class: "help" }, "ClaudeChain works on one git repository at a time. Its pipeline, prompts, work items and worktrees are kept in the data directory, so each repository keeps its own setup. Switching is only possible while no agents are running."),
+    h("p", { class: "help" }, "This tab switches to the repository you open. Repositories opened earlier stay open and keep running their agents; open another browser tab to look at several at the same time. The pipeline, prompts, work items and worktrees are kept in the data directory, so each repository keeps its own setup."),
     recent,
     browser.el,
     h("label", {}, "Repository"), h("div", { class: "field" }, repo),
     h("label", {}, "Data directory (optional)"), h("div", { class: "field" }, data),
     h("label", { title: "New work items get their worktree branch from this local branch." }, "Main branch (optional)"), h("div", { class: "field" }, main),
-  ], () => api("POST", "/api/workspace", { repo: repo.value, data: data.value || null, main: main.value.trim() || null }), "Open", true);
+  ], () => openRepo({ repo: repo.value, data: data.value || null, main: main.value.trim() || null }), "Open", true);
   browser.go(S.repo ? S.repo.replace(/\/[^/]+\/?$/, "") || "/" : "");
+}
+
+// Pipelines ----------------------------------------------------------------
+// Each pipeline is a data directory of the same repository; <data>/pipelines.json
+// names it and lists the others, which fills this dropdown.
+
+const PIPE_NEW = ":new", PIPE_RENAME = ":rename"; // data paths are absolute, so these never clash
+
+function renderPipelineSelect() {
+  const sel = $("#pipeline-select");
+  sel.hidden = !S.repo;
+  if (!S.repo) return sel.replaceChildren();
+  sel.replaceChildren(
+    ...S.pipelines.map((p) => h("option", { value: p.id, selected: p.id === S.repoId, title: p.data },
+      p.name, p.missing ? " (missing)" : "", p.running ? ` · ${p.running} running` : "")),
+    h("option", { disabled: true }, "──────────"),
+    h("option", { value: PIPE_NEW }, "+ New pipeline…"),
+    h("option", { value: PIPE_RENAME }, "✎ Rename current…"),
+  );
+  sel.value = S.repoId;
+  sel.title = `Pipeline "${S.pipelineName ?? ""}"\nData ${S.data}`;
+}
+
+/// Refreshes only the pipeline list (running counts), at most once a second.
+function schedulePipelineRefresh() {
+  if (schedulePipelineRefresh.timer) return;
+  schedulePipelineRefresh.timer = setTimeout(async () => {
+    schedulePipelineRefresh.timer = null;
+    try {
+      const st = await api("GET", "/api/state");
+      if (st.id !== S.repoId) return;
+      S.pipelines = st.pipelines || [];
+      renderPipelineSelect();
+    } catch {}
+  }, 1000);
+}
+
+async function onPipelineSelect(e) {
+  const v = e.target.value;
+  e.target.value = S.repoId; // the selection follows the open pipeline, not the click
+  if (v === PIPE_NEW) return addPipelineDialog();
+  if (v === PIPE_RENAME) return renamePipelineDialog();
+  if (!v || v === S.repoId) return;
+  await act(async () => {
+    // Pipelines of the repository are open apps of their own; move this tab to it.
+    closeInspector();
+    setRepoId(v);
+    await load();
+  });
+}
+
+function addPipelineDialog() {
+  const name = h("input", { type: "text", placeholder: "e.g. Docs" });
+  const data = h("input", { type: "text" });
+  const repo = S.repo.replace(/\/+$/, "");
+  // Suggest <repo>/.claudechain-<name> until a folder is typed or picked.
+  let auto = true;
+  const suggest = () => {
+    const s = name.value.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    if (auto) data.value = s ? `${repo}/.claudechain-${s}` : "";
+  };
+  name.oninput = suggest;
+  data.oninput = () => (auto = !data.value);
+  const browser = folderBrowser((path) => {
+    auto = false;
+    data.value = path;
+  });
+  dialog("New pipeline", [
+    h("p", { class: "help" }, "A pipeline has its own steps, prompts, work items and worktrees, kept in its own folder (a new folder gets the default pipeline). It works on the same repository. All pipelines run at the same time; switching only changes which one you see, so running agents are not interrupted."),
+    h("label", {}, "Name"), h("div", { class: "field" }, name),
+    browser.el,
+    h("label", {}, "Folder"), h("div", { class: "field" }, data),
+  ], async () => {
+    const { id } = await api("POST", "/api/pipelines", { name: name.value, data: data.value });
+    closeInspector();
+    setRepoId(id);
+    await load();
+  }, "Create", true);
+  browser.go(S.repo);
+  setTimeout(() => name.focus(), 0);
+}
+
+function renamePipelineDialog() {
+  const name = h("input", { type: "text", value: S.pipelineName ?? "" });
+  dialog("Rename pipeline", [
+    h("p", { class: "help" }, `Only the name changes; the pipeline stays in ${S.data}.`),
+    h("label", {}, "Name"), h("div", { class: "field" }, name),
+  ], async () => {
+    await api("POST", "/api/pipelines/rename", { name: name.value });
+    await load();
+  }, "Rename");
+  setTimeout(() => { name.focus(); name.select(); }, 0);
 }
 
 // Pipeline editor ----------------------------------------------------------
@@ -1023,6 +1209,45 @@ function presetPicker(onPick) {
   dlg.addEventListener("close", () => dlg.remove());
   document.body.append(dlg);
   dlg.showModal();
+}
+
+// Small modal on top of the pipeline dialog: the user describes a pipeline and picks a
+// model; Claude returns the steps (with a prompt each). Calls onDone(generated).
+function generatorDialog(models, onDone) {
+  const ta = h("textarea", { rows: 5, placeholder: "e.g. Create an electronics pipeline: requirements, schematic design, part selection, PCB layout review and ordering after my approval" });
+  const preferred = models.find((m) => m.includes("opus")) ?? models[0];
+  const sel = h("select", {}, models.map((m) => h("option", { value: m, selected: m === preferred }, m)));
+  const err = h("p", { class: "error" });
+  const go = h("button", { class: "primary" }, "Generate");
+  const cancel = h("button", { onclick: () => dlg.close() }, "Cancel");
+  const dlg = h("dialog", { class: "preset-picker generator" },
+    h("h2", {}, "Generate pipeline using prompt"),
+    h("p", { class: "help" }, "Describe the pipeline you want. The model picks the stages, workers, approvals, permissions, tools, models and a prompt for each stage. The result replaces all steps in the editor; nothing is saved until you click “Save pipeline”, which then also writes each step’s prompt (replacing an existing prompt of a step with the same id)."),
+    h("label", {}, "Prompt"), ta,
+    h("label", {}, "Model used to generate"), sel,
+    err,
+    h("div", { class: "preset-actions" }, cancel, go),
+  );
+  go.onclick = async () => {
+    err.textContent = "";
+    go.disabled = ta.disabled = sel.disabled = true;
+    go.textContent = "Generating… (can take a minute)";
+    try {
+      const g = await api("POST", "/api/pipeline/generate", { prompt: ta.value, model: sel.value, models });
+      if (!dlg.open) return;
+      dlg.close();
+      onDone(g);
+    } catch (e) {
+      err.textContent = e.message;
+    } finally {
+      go.disabled = ta.disabled = sel.disabled = false;
+      go.textContent = "Generate";
+    }
+  };
+  dlg.addEventListener("close", () => dlg.remove());
+  document.body.append(dlg);
+  dlg.showModal();
+  ta.focus();
 }
 
 function pipelineDialog() {
@@ -1132,6 +1357,10 @@ function pipelineDialog() {
           }),
         ),
       ),
+      step._prompt != null ? h("details", { class: "gen-prompt" },
+        h("summary", {}, "Generated prompt (written to the step’s prompt file on save)"),
+        (() => { const ta = h("textarea", { rows: 10 }); ta.value = step._prompt; ta.oninput = () => (step._prompt = ta.value); return ta; })(),
+      ) : "",
     );
   };
 
@@ -1154,6 +1383,15 @@ function pipelineDialog() {
           title: "Replace the pipeline and all prompts with a shared pipeline file",
           onclick: () => act(importPipeline),
         }, "Import…"),
+        h("button", {
+          type: "button",
+          title: "Let a model build the whole pipeline from a description (you review it before saving)",
+          onclick: () => generatorDialog(draft.models, (g) => {
+            draft.max_iterations = g.max_iterations;
+            draft.steps = g.steps.map(({ prompt, ...s }) => ({ ...s, effort: s.effort ?? null, _new: true, _idEdited: true, _prompt: prompt || null }));
+            render();
+          }),
+        }, "Generate pipeline using prompt…"),
       ),
       h("div", { class: "pl-settings" },
         h("div", {}, h("label", {}, "Max backward moves per item"),
@@ -1178,9 +1416,13 @@ function pipelineDialog() {
     $("#dialog-body").scrollTop = scroll;
   }
 
-  dialog("Pipeline", [body], () => {
-    const steps = draft.steps.map(({ _new, _idEdited, ...s }) => s);
-    return api("PUT", "/api/pipeline", { ...draft, steps });
+  dialog("Pipeline", [body], async () => {
+    const steps = draft.steps.map(({ _new, _idEdited, _prompt, ...s }) => s);
+    await api("PUT", "/api/pipeline", { ...draft, steps });
+    // Prompts of generated steps: the steps exist now, so the prompt endpoint accepts them.
+    for (const s of draft.steps) {
+      if (s._prompt) await api("PUT", `/api/prompts/${s.id}`, { text: s._prompt });
+    }
   }, "Save pipeline", true);
   render();
 }
@@ -1235,8 +1477,8 @@ function showPage(page) {
   $("#board-page").hidden = page !== "board";
   $("#resources-page").hidden = page !== "resources";
   for (const b of document.querySelectorAll("#pages button")) b.classList.toggle("active", b.dataset.page === page);
-  if (page !== "board") closeInspector();
-  if (location.hash !== (page === "board" ? "" : `#${page}`)) history.replaceState(null, "", page === "board" ? location.pathname : `#${page}`);
+  if (page !== "board") closeInspectorByUser();
+  if (location.hash !== (page === "board" ? "" : `#${page}`)) history.replaceState(null, "", `${location.pathname}${location.search}${page === "board" ? "" : `#${page}`}`);
   if (page === "resources") startResources();
   else stopResources();
 }
@@ -1246,9 +1488,11 @@ window.addEventListener("hashchange", () => showPage(location.hash === "#resourc
 
 $("#btn-add").onclick = addDialog;
 $("#repo").onclick = workspaceDialog;
+$("#pipeline-select").onchange = onPipelineSelect;
 $("#btn-open-repo").onclick = workspaceDialog;
 $("#dialog-cancel").onclick = () => $("#dialog").close();
-$("#insp-close").onclick = closeInspector;
+$("#insp-close").onclick = closeInspectorByUser;
+$("#pause").onclick = () => act(() => setPaused(!(S.account?.manual_paused || S.account?.hold)));
 
 // Inspector width: drag the left edge to resize; the width is kept in localStorage.
 const INSP_WIDTH_KEY = "claudechain-inspector-width";
@@ -1347,10 +1591,11 @@ function restartItem(id) {
 $("#insp-remove").onclick = () => removeItem(S.insp.id);
 $("#composer").onsubmit = (e) => e.preventDefault();
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && S.insp && !$("#dialog").open) closeInspector();
+  if (e.key === "Escape" && S.insp && !$("#dialog").open) closeInspectorByUser();
 });
 // Keep the time labels on the board current (live clocks tick every second).
 setInterval(tickAgoLabels, 1000);
+setInterval(() => S.pipelines.length > 1 && !document.hidden && schedulePipelineRefresh(), 5000); // other pipelines' events don't reach this tab
 // Keep durations of running items ticking.
 setInterval(() => {
   if ([...S.items.values()].some((i) => i.status === "running")) {
