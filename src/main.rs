@@ -1,5 +1,6 @@
 mod account;
 mod config;
+mod generate;
 mod git;
 mod mcp;
 mod orchestrator;

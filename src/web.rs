@@ -18,6 +18,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::config;
+use crate::generate;
 use crate::git;
 use crate::orchestrator::{self, App, MessageMode};
 use crate::store::Layout;
@@ -88,6 +89,7 @@ pub fn router(ws: Ws, allowed_hosts: Vec<String>) -> Router {
         .route("/api/pause", put(put_pause))
         .route("/api/limits/refresh", post(refresh_limits))
         .route("/api/pipeline", put(put_pipeline))
+        .route("/api/pipeline/generate", post(generate_pipeline))
         .route("/api/settings", put(put_settings))
         .route("/api/steps/{step}", put(put_step))
         .route("/api/prompts/{id}", get(get_prompt).put(put_prompt))
@@ -313,6 +315,23 @@ async fn put_pause(State(ws): State<Ws>, Json(p): Json<PauseSettings>) -> ApiRes
 async fn put_pipeline(Cur(app): Cur, Json(p): Json<config::Pipeline>) -> ApiResult<Json<Value>> {
     app.replace_pipeline(p)?;
     Ok(Json(json!({})))
+}
+
+#[derive(Deserialize)]
+struct GenerateRequest {
+    prompt: String,
+    model: String,
+    /// Models the generated steps may use (the editor's list); defaults to
+    /// the pipeline's.
+    #[serde(default)]
+    models: Option<Vec<String>>,
+}
+
+/// Asks Claude for a pipeline draft; nothing is saved here.
+async fn generate_pipeline(Cur(app): Cur, Json(r): Json<GenerateRequest>) -> ApiResult<Json<Value>> {
+    let models = r.models.filter(|m| !m.is_empty()).unwrap_or_else(|| app.pipeline().models);
+    let g = generate::generate(&app.claude, &app.layout.repo, &r.model, &r.prompt, &models).await?;
+    Ok(Json(json!(g)))
 }
 
 #[derive(Deserialize)]

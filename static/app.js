@@ -1211,6 +1211,45 @@ function presetPicker(onPick) {
   dlg.showModal();
 }
 
+// Small modal on top of the pipeline dialog: the user describes a pipeline and picks a
+// model; Claude returns the steps (with a prompt each). Calls onDone(generated).
+function generatorDialog(models, onDone) {
+  const ta = h("textarea", { rows: 5, placeholder: "e.g. Create an electronics pipeline: requirements, schematic design, part selection, PCB layout review and ordering after my approval" });
+  const preferred = models.find((m) => m.includes("opus")) ?? models[0];
+  const sel = h("select", {}, models.map((m) => h("option", { value: m, selected: m === preferred }, m)));
+  const err = h("p", { class: "error" });
+  const go = h("button", { class: "primary" }, "Generate");
+  const cancel = h("button", { onclick: () => dlg.close() }, "Cancel");
+  const dlg = h("dialog", { class: "preset-picker generator" },
+    h("h2", {}, "Generate pipeline using prompt"),
+    h("p", { class: "help" }, "Describe the pipeline you want. The model picks the stages, workers, approvals, permissions, tools, models and a prompt for each stage. The result replaces all steps in the editor; nothing is saved until you click “Save pipeline”, which then also writes each step’s prompt (replacing an existing prompt of a step with the same id)."),
+    h("label", {}, "Prompt"), ta,
+    h("label", {}, "Model used to generate"), sel,
+    err,
+    h("div", { class: "preset-actions" }, cancel, go),
+  );
+  go.onclick = async () => {
+    err.textContent = "";
+    go.disabled = ta.disabled = sel.disabled = true;
+    go.textContent = "Generating… (can take a minute)";
+    try {
+      const g = await api("POST", "/api/pipeline/generate", { prompt: ta.value, model: sel.value, models });
+      if (!dlg.open) return;
+      dlg.close();
+      onDone(g);
+    } catch (e) {
+      err.textContent = e.message;
+    } finally {
+      go.disabled = ta.disabled = sel.disabled = false;
+      go.textContent = "Generate";
+    }
+  };
+  dlg.addEventListener("close", () => dlg.remove());
+  document.body.append(dlg);
+  dlg.showModal();
+  ta.focus();
+}
+
 function pipelineDialog() {
   const draft = structuredClone({
     max_iterations: S.pipeline.max_iterations,
@@ -1318,6 +1357,10 @@ function pipelineDialog() {
           }),
         ),
       ),
+      step._prompt != null ? h("details", { class: "gen-prompt" },
+        h("summary", {}, "Generated prompt (written to the step’s prompt file on save)"),
+        (() => { const ta = h("textarea", { rows: 10 }); ta.value = step._prompt; ta.oninput = () => (step._prompt = ta.value); return ta; })(),
+      ) : "",
     );
   };
 
@@ -1330,6 +1373,15 @@ function pipelineDialog() {
           title: "Edit the general prompt shared by every step (closes this dialog; unsaved pipeline changes are lost)",
           onclick: () => editPrompt("general", "General prompt"),
         }, "General prompt…"),
+        h("button", {
+          type: "button",
+          title: "Let a model build the whole pipeline from a description (you review it before saving)",
+          onclick: () => generatorDialog(draft.models, (g) => {
+            draft.max_iterations = g.max_iterations;
+            draft.steps = g.steps.map(({ prompt, ...s }) => ({ ...s, effort: s.effort ?? null, _new: true, _idEdited: true, _prompt: prompt || null }));
+            render();
+          }),
+        }, "Generate pipeline using prompt…"),
       ),
       h("div", { class: "pl-settings" },
         h("div", {}, h("label", {}, "Max backward moves per item"),
@@ -1354,9 +1406,13 @@ function pipelineDialog() {
     $("#dialog-body").scrollTop = scroll;
   }
 
-  dialog("Pipeline", [body], () => {
-    const steps = draft.steps.map(({ _new, _idEdited, ...s }) => s);
-    return api("PUT", "/api/pipeline", { ...draft, steps });
+  dialog("Pipeline", [body], async () => {
+    const steps = draft.steps.map(({ _new, _idEdited, _prompt, ...s }) => s);
+    await api("PUT", "/api/pipeline", { ...draft, steps });
+    // Prompts of generated steps: the steps exist now, so the prompt endpoint accepts them.
+    for (const s of draft.steps) {
+      if (s._prompt) await api("PUT", `/api/prompts/${s.id}`, { text: s._prompt });
+    }
   }, "Save pipeline", true);
   render();
 }
