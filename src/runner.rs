@@ -56,7 +56,7 @@ pub fn local_event(subtype: &str, text: &str) -> Value {
 /// `cargo run` sets for ClaudeChain itself. rustup's RUSTUP_TOOLCHAIN would
 /// otherwise override the worktree's rust-toolchain.toml in every build the
 /// agent runs, so its builds use a different compiler and share no cache.
-fn scrub_env(cmd: &mut Command) {
+pub(crate) fn scrub_env(cmd: &mut Command) {
     for (key, _) in std::env::vars_os() {
         let k = key.to_string_lossy();
         if k.starts_with("ANTHROPIC_")
