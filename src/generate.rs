@@ -121,6 +121,7 @@ pub fn parse(text: &str, models: &[String]) -> Result<Generated> {
         max_iterations: g.max_iterations,
         models: models.to_vec(),
         steps: g.steps.iter().map(|s| s.step.clone()).collect(),
+        conflicts: Default::default(),
     };
     pipeline.validate()?;
     Ok(g)

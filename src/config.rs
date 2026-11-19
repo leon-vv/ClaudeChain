@@ -17,6 +17,65 @@ pub struct Pipeline {
     pub models: Vec<String>,
     #[serde(rename = "step", alias = "steps")]
     pub steps: Vec<Step>,
+    /// Settings of the agent behind the "Fix conflicts" button. Optional in
+    /// `pipeline.toml`; older files get the defaults.
+    #[serde(default)]
+    pub conflicts: ConflictSettings,
+}
+
+/// Run id (used like a step id for run folders and messages) and prompt id of
+/// the merge-conflict agent. Not a pipeline step: its runs never move the item.
+pub const CONFLICT_STEP: &str = "merge_conflict";
+
+/// Model, effort and tools of the agent that fixes merge conflicts of an
+/// item's pull request. Its prompt is `prompts/merge_conflict.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConflictSettings {
+    #[serde(default = "default_conflict_model")]
+    pub model: String,
+    /// Thinking level passed to `claude --effort`; None uses Claude's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default = "default_conflict_tools")]
+    pub tools: Vec<String>,
+    #[serde(default = "default_permission_mode")]
+    pub permission_mode: String,
+}
+
+impl Default for ConflictSettings {
+    fn default() -> Self {
+        Self {
+            model: default_conflict_model(),
+            effort: None,
+            tools: default_conflict_tools(),
+            permission_mode: default_permission_mode(),
+        }
+    }
+}
+
+impl ConflictSettings {
+    /// The settings as a step, so the run machinery can treat it like one.
+    /// Its transitions are "done" (fixed and pushed) and "human".
+    pub fn as_step(&self) -> Step {
+        Step {
+            id: CONFLICT_STEP.into(),
+            name: "Fix merge conflicts".into(),
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+            max_workers: 1,
+            require_approval: false,
+            allowed_targets: vec!["done".into(), "human".into()],
+            tools: self.tools.clone(),
+            permission_mode: self.permission_mode.clone(),
+        }
+    }
+}
+
+fn default_conflict_model() -> String {
+    "claude-sonnet-5-5".into()
+}
+fn default_conflict_tools() -> Vec<String> {
+    ["Read", "Grep", "Glob", "Bash", "Write", "Edit"].map(String::from).to_vec()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +127,7 @@ const DEFAULT_PROMPTS: &[(&str, &str)] = &[
     ("build_test", include_str!("../defaults/prompts/build_test.md")),
     ("review", include_str!("../defaults/prompts/review.md")),
     ("pull_request", include_str!("../defaults/prompts/pull_request.md")),
+    (CONFLICT_STEP, include_str!("../defaults/prompts/merge_conflict.md")),
 ];
 
 impl Pipeline {
@@ -98,8 +158,11 @@ impl Pipeline {
             }
             let id_ok = !s.id.is_empty()
                 && s.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
-            if !id_ok || matches!(s.id.as_str(), "general" | "next" | "human" | "done") {
-                bail!("invalid step id '{}': use lowercase letters, digits, '_' or '-' (reserved: general, next, human, done)", s.id);
+            if !id_ok || matches!(s.id.as_str(), "general" | "next" | "human" | "done" | CONFLICT_STEP) {
+                bail!(
+                    "invalid step id '{}': use lowercase letters, digits, '_' or '-' (reserved: general, next, human, done, {CONFLICT_STEP})",
+                    s.id
+                );
             }
             if s.name.trim().is_empty() {
                 bail!("step '{}' needs a name", s.id);
@@ -123,6 +186,18 @@ impl Pipeline {
                     bail!("step '{}' has unknown target '{}'", s.id, t);
                 }
             }
+        }
+        let c = &self.conflicts;
+        if c.model.trim().is_empty() {
+            bail!("the merge-conflict agent needs a model");
+        }
+        if let Some(e) = &c.effort
+            && !EFFORT_LEVELS.contains(&e.as_str())
+        {
+            bail!("the merge-conflict agent has unknown effort '{}': use one of {}", e, EFFORT_LEVELS.join(", "));
+        }
+        if !c.tools.iter().any(|t| t == "Write") {
+            bail!("the merge-conflict agent needs the Write tool to write its message and transition files");
         }
         Ok(())
     }
@@ -169,8 +244,12 @@ pub fn stub_prompt(name: &str) -> String {
     )
 }
 
+/// The prompt from the data directory; when the file is missing (e.g. a
+/// data directory from before that prompt existed), the built-in default.
 pub fn read_prompt(data: &Path, id: &str) -> String {
-    std::fs::read_to_string(prompt_path(data, id)).unwrap_or_default()
+    std::fs::read_to_string(prompt_path(data, id)).unwrap_or_else(|_| {
+        DEFAULT_PROMPTS.iter().find(|(p, _)| *p == id).map(|(_, t)| t.to_string()).unwrap_or_default()
+    })
 }
 
 pub fn write_prompt(data: &Path, id: &str, text: &str) -> Result<()> {
@@ -298,6 +377,43 @@ mod tests {
 
         let p: Pipeline = toml::from_str(&text("effort = \"turbo\"\n")).unwrap();
         assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn conflict_settings_default_and_round_trip() {
+        // A pipeline.toml without a [conflicts] section still loads.
+        let text = "[[step]]\nid = \"a\"\nname = \"A\"\nmodel = \"m\"\nallowed_targets = [\"next\"]\ntools = [\"Write\"]\n";
+        let mut p: Pipeline = toml::from_str(text).unwrap();
+        p.validate().unwrap();
+        assert_eq!(p.conflicts.model, "claude-sonnet-5-5");
+        assert_eq!(p.conflicts.effort, None);
+        assert!(p.conflicts.tools.iter().any(|t| t == "Bash"));
+
+        p.conflicts.model = "claude-opus-5-5".into();
+        p.conflicts.effort = Some("high".into());
+        let back: Pipeline = toml::from_str(&toml::to_string_pretty(&p).unwrap()).unwrap();
+        assert_eq!(back.conflicts.model, "claude-opus-5-5");
+        assert_eq!(back.conflicts.effort.as_deref(), Some("high"));
+        assert_eq!(back.steps.len(), 1);
+
+        p.conflicts.effort = Some("turbo".into());
+        assert!(p.validate().is_err());
+
+        let step = back.conflicts.as_step();
+        assert_eq!(step.id, CONFLICT_STEP);
+        assert_eq!(step.model, "claude-opus-5-5");
+    }
+
+    #[test]
+    fn conflict_step_id_is_reserved_and_has_a_default_prompt() {
+        let text = format!(
+            "[[step]]\nid = \"{CONFLICT_STEP}\"\nname = \"A\"\nmodel = \"m\"\nallowed_targets = [\"next\"]\ntools = [\"Write\"]\n"
+        );
+        let p: Pipeline = toml::from_str(&text).unwrap();
+        assert!(p.validate().is_err());
+        let dir = std::env::temp_dir().join(format!("claudechain-conflict-prompt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(read_prompt(&dir, CONFLICT_STEP).contains("merge"));
     }
 
     fn temp_data() -> PathBuf {

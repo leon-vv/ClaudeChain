@@ -72,7 +72,9 @@ async function act(fn) {
 }
 
 const stepById = (id) => S.pipeline.steps.find((s) => s.id === id);
-const stepName = (id) => (id === "done" ? "Done" : stepById(id)?.name ?? id);
+// Run "step" of the merge-conflict agent (not a pipeline step; see config::CONFLICT_STEP).
+const CONFLICT_STEP = "merge_conflict";
+const stepName = (id) => (id === "done" ? "Done" : id === CONFLICT_STEP ? "Fix conflicts" : stepById(id)?.name ?? id);
 const stepIndex = (id) => S.pipeline.steps.findIndex((s) => s.id === id);
 const shortModel = (m) => m.replace(/^claude-/, "");
 const fmtCost = (c) => (c == null ? "" : `$${c.toFixed(2)}`);
@@ -402,7 +404,8 @@ function renderBoard() {
   $("#empty").hidden = items.length > 0;
 
   const busy = {};
-  for (const it of items) if (it.status === "running") busy[it.step] = (busy[it.step] || 0) + 1;
+  // A merge-conflict run (conflict_restore set) doesn't take a step's worker slot.
+  for (const it of items) if (it.status === "running" && !it.conflict_restore) busy[it.step] = (busy[it.step] || 0) + 1;
 
   const head = h("tr", {},
     h("th", { class: "corner" }, `${items.length} item${items.length === 1 ? "" : "s"}`,
@@ -487,6 +490,7 @@ function itemCell(it) {
       h("span", {}, it.id),
       it.url && h("a", { href: it.url, target: "_blank", rel: "noopener" }, "issue ↗"),
       it.pr_url && h("a", { href: it.pr_url, target: "_blank", rel: "noopener" }, "PR ↗"),
+      conflictControl(it),
       it.iteration > 0 && h("span", { title: "Backward moves" }, `↩ ${it.iteration}`),
       tokens > 0 && h("span", { title: `${tokens.toLocaleString()} tokens over ${it.runs.length} runs; ≈ ${fmtCost(cost)} API-equivalent (covered by your subscription)` }, `${fmtTok(tokens)} tok`),
     ),
@@ -494,6 +498,36 @@ function itemCell(it) {
     it.pending_notes.length > 0 && h("div", { class: "detail" }, `💬 ${it.pending_notes.length} message(s) waiting for the next run`),
   );
 }
+// "Fix conflicts" button next to the PR link. While the agent runs it turns into a
+// spinner that opens the run's details; afterwards a ✓/✗ links to the last such run.
+function conflictControl(it) {
+  if (!it.pr_url) return null;
+  const runs = it.runs.filter((r) => r.step === CONFLICT_STEP);
+  const last = runs[runs.length - 1];
+  if (last && !last.ended) {
+    return h("span", {
+      class: "conflict-ctl running",
+      title: "Fixing merge conflicts… click for details",
+      onclick: () => openInspector(it.id, last.n, true),
+    }, h("span", { class: "spinner", "aria-label": "Fixing merge conflicts" }));
+  }
+  const busy = it.status === "running";
+  return h("span", { class: "conflict-ctl" },
+    h("button", {
+      class: "small",
+      disabled: busy,
+      title: busy
+        ? "Wait until the current run finishes"
+        : "Merge the main branch into this item's branch, resolve the conflicts and push to the PR",
+      onclick: () => act(() => api("POST", `/api/items/${it.id}/fix-conflicts`)),
+    }, "Fix conflicts"),
+    last && h("span", {
+      class: `chip ${last.failed ? "fail" : "ok"}`,
+      title: `Last conflict fix (#${last.n}): ${last.outcome || ""}`,
+      onclick: () => openInspector(it.id, last.n),
+    }, last.failed ? "✗" : "✓"));
+}
+
 // Last column: restart and remove buttons, always shown.
 function rowActions(it) {
   return h("td", { class: "row-actions" },
@@ -1267,6 +1301,9 @@ function pipelineDialog() {
     max_iterations: S.pipeline.max_iterations,
     models: S.pipeline.models,
     steps: S.pipeline.steps,
+    conflicts: S.pipeline.conflicts ?? {
+      model: "claude-sonnet-5-5", tools: ["Read", "Grep", "Glob", "Bash", "Write", "Edit"], permission_mode: "dontAsk",
+    },
   });
   const body = h("div", {});
 
@@ -1410,6 +1447,23 @@ function pipelineDialog() {
           h("input", { type: "number", min: 0, max: 100, value: draft.max_iterations, onchange: (e) => (draft.max_iterations = parseInt(e.target.value, 10) || 0) })),
         h("div", {}, h("label", {}, "Models offered in dropdowns (comma-separated)"),
           h("input", { type: "text", value: draft.models.join(", "), onchange: (e) => { draft.models = e.target.value.split(",").map((x) => x.trim()).filter(Boolean); render(); } })),
+      ),
+      h("div", { class: "pl-conflicts" },
+        h("div", { class: "pl-conflicts-title" }, "Fix conflicts agent",
+          h("span", { class: "help" }, " — runs when you press “Fix conflicts” next to an item's PR link: merges the main branch into the item's branch, resolves the conflicts and pushes to the PR.")),
+        h("div", { class: "inline" },
+          h("label", {}, "model ",
+            h("select", { onchange: (e) => (draft.conflicts.model = e.target.value) },
+              [...new Set([...draft.models, draft.conflicts.model])].map((m) => h("option", { value: m, selected: m === draft.conflicts.model }, m)))),
+          h("label", { title: "Thinking level (claude --effort)" }, " effort ",
+            h("select", { onchange: (e) => (draft.conflicts.effort = e.target.value || null) }, effortOptions(draft.conflicts.effort, "default"))),
+          h("button", {
+            type: "button",
+            class: "small",
+            title: "Edit the prompt of the Fix conflicts agent (closes this dialog; unsaved pipeline changes are lost)",
+            onclick: () => editPrompt(CONFLICT_STEP, "Fix conflicts prompt"),
+          }, "Prompt…"),
+        ),
       ),
       h("p", { class: "help" }, "Steps run left to right. Under Transitions, “→ step” passes an item on to the following step (“Done” on the last step finishes it), “Human” stops and asks you, and the other boxes are the steps an agent may send work to, e.g. back to Implementation when a build fails. New steps get a starter prompt you can edit from the column header. A step can only be removed when no unfinished item is in it."),
       ...draft.steps.map(card),
