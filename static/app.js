@@ -309,9 +309,8 @@ function setRepoId(id) {
 }
 
 /// Opens a repository on the server and switches this tab to it. Other tabs
-/// keep showing theirs.
-// Opens a repository. If the folder is not a git repository yet, or has no
-// commits, asks the user and retries with `init` (git init / empty first commit).
+/// keep showing theirs. If the folder is not a git repository yet, or has no
+/// commits, asks the user and retries with `init` (git init / empty first commit).
 async function openRepo(body) {
   let res;
   try {
