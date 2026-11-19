@@ -51,7 +51,7 @@ async function api(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { code: data.code });
   return data;
 }
 
@@ -309,9 +309,21 @@ function setRepoId(id) {
 }
 
 /// Opens a repository on the server and switches this tab to it. Other tabs
-/// keep showing theirs.
+/// keep showing theirs. If the folder is not a git repository yet, or has no
+/// commits, asks the user and retries with `init` (git init / empty first commit).
 async function openRepo(body) {
-  const { id } = await api("POST", "/api/workspace", body);
+  let res;
+  try {
+    res = await api("POST", "/api/workspace", body);
+  } catch (err) {
+    const ask = {
+      not_repo: `${err.message}.\n\nRun "git init" there and create an empty first commit so ClaudeChain can use it?`,
+      no_commits: `${err.message}.\n\nClaudeChain needs at least one commit to create worktrees from. Create an empty "Initial commit" now?`,
+    }[err.code];
+    if (!ask || !confirm(ask)) throw err;
+    res = await api("POST", "/api/workspace", { ...body, init: true });
+  }
+  const { id } = res;
   if (id !== S.repoId) {
     closeInspector();
     setRepoId(id);

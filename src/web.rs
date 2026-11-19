@@ -65,7 +65,12 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (StatusCode::BAD_REQUEST, Json(json!({"error": format!("{:#}", self.0)}))).into_response()
+        let mut body = json!({"error": format!("{:#}", self.0)});
+        // Lets the UI offer to fix a folder that needs `git init` or a first commit.
+        if let Some(setup) = self.0.downcast_ref::<workspace::RepoSetup>() {
+            body["code"] = json!(setup.code());
+        }
+        (StatusCode::BAD_REQUEST, Json(body)).into_response()
     }
 }
 
@@ -208,11 +213,14 @@ struct OpenWorkspace {
     repo: String,
     data: Option<String>,
     main: Option<String>,
+    /// Run `git init` / create an empty first commit if needed (user confirmed).
+    #[serde(default)]
+    init: bool,
 }
 
 async fn open_workspace(State(ws): State<Ws>, Json(o): Json<OpenWorkspace>) -> ApiResult<Json<Value>> {
     let data = o.data.as_deref().map(str::trim).filter(|d| !d.is_empty()).map(FsPath::new);
-    let id = ws.open(FsPath::new(o.repo.trim()), data, o.main.as_deref()).await?;
+    let id = ws.open(FsPath::new(o.repo.trim()), data, o.main.as_deref(), o.init).await?;
     Ok(Json(json!({ "id": id })))
 }
 

@@ -50,6 +50,33 @@ pub async fn default_branch(repo: &Path) -> Result<String> {
         .map_err(|_| anyhow::anyhow!("could not determine the main branch; enter it explicitly"))
 }
 
+/// Whether HEAD points at a commit (false right after `git init`).
+pub async fn has_commits(repo: &Path) -> Result<bool> {
+    let out = git(repo).args(["rev-parse", "--verify", "--quiet", "HEAD"]).output().await?;
+    Ok(out.status.success())
+}
+
+/// Runs `git init` in `dir`.
+pub async fn init(dir: &Path) -> Result<()> {
+    output(git(dir).arg("init")).await?;
+    Ok(())
+}
+
+/// Creates an empty first commit so worktrees have something to branch from.
+/// Falls back to a placeholder identity when the user has none configured.
+pub async fn initial_commit(repo: &Path) -> Result<()> {
+    let mut cmd = git(repo);
+    for (key, fallback) in [("user.name", "ClaudeChain"), ("user.email", "claudechain@localhost")] {
+        let set = git(repo).args(["config", key]).output().await?;
+        if !set.status.success() || set.stdout.trim_ascii().is_empty() {
+            cmd.arg("-c").arg(format!("{key}={fallback}"));
+        }
+    }
+    cmd.args(["commit", "--allow-empty", "-m", "Initial commit"]);
+    output(&mut cmd).await?;
+    Ok(())
+}
+
 /// Keeps the data directory out of `git status` in the target repo.
 pub async fn exclude_path(repo: &Path, data: &Path) -> Result<()> {
     let Ok(rel) = data.strip_prefix(repo) else { return Ok(()) };
@@ -188,5 +215,21 @@ mod tests {
         assert!(ensure_worktree(&repo, &wt, "item", "main").await.is_err());
         assert_eq!(ensure_worktree(&repo, &wt, "item", "trunk").await.unwrap(), trunk);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn init_then_initial_commit() {
+        let dir = std::env::temp_dir().join(format!("claudechain-gitinit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        init(&dir).await.unwrap();
+        check_repo(&dir).await.unwrap();
+        assert!(!has_commits(&dir).await.unwrap());
+        initial_commit(&dir).await.unwrap();
+        assert!(has_commits(&dir).await.unwrap());
+        let wt = dir.join("wt");
+        let main = default_branch(&dir).await.unwrap();
+        ensure_worktree(&dir, &wt, "claudechain/test", &main).await.unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
