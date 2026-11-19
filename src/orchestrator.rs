@@ -13,10 +13,10 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 
 use crate::account::Account;
-use crate::config::{self, Pipeline, Step};
+use crate::config::{self, CONFLICT_STEP, Pipeline, Step};
 use crate::git;
 use crate::runner::{self, RunControl, RunSpec};
-use crate::store::{self, Item, Layout, Note, PendingResume, Run, Status, TokenMeter, Transition};
+use crate::store::{self, Item, Layout, Note, PendingResume, Run, SavedStatus, Status, TokenMeter, Transition};
 
 /// Events pushed to the browser over SSE.
 #[derive(Debug, Clone, Serialize)]
@@ -141,8 +141,13 @@ impl App {
                     run.failed = true;
                     run.outcome = Some("Interrupted (ClaudeChain restarted)".into());
                 }
-                item.status = Status::Queued;
-                item.approved = true;
+                if item.conflict_restore.is_some() {
+                    // A merge-conflict run: the item goes back to where it was.
+                    item.restore_after_conflict_run();
+                } else {
+                    item.status = Status::Queued;
+                    item.approved = true;
+                }
                 store::save_item(&layout, item)?;
             }
         }
@@ -330,6 +335,7 @@ impl App {
             base_commit: None,
             pr_url: None,
             disk: None,
+            conflict_restore: None,
         };
         {
             let mut items = self.items.lock().unwrap();
@@ -477,6 +483,47 @@ impl App {
         Ok(())
     }
 
+    /// Starts an agent that merges the main branch into the item's branch,
+    /// resolves the conflicts and pushes to the item's pull request. The run
+    /// is recorded with step `CONFLICT_STEP` and doesn't move the item: when
+    /// it ends the item returns to the status it had. It starts right away
+    /// (a direct request from the human), so it ignores the pause, the plan
+    /// limit and step worker limits. Returns the run number.
+    pub fn fix_conflicts(self: &Arc<Self>, id: &str) -> Result<u32> {
+        let model = self.pipeline().conflicts.model;
+        let n = self.update_item(id, |item| {
+            if item.status == Status::Running {
+                bail!("{id} is running; wait until it finishes or stop it first");
+            }
+            if item.pr_url.is_none() {
+                bail!("{id} has no pull request yet");
+            }
+            let n = item.next_run_number();
+            item.conflict_restore = Some(SavedStatus { status: item.status, detail: item.status_detail.clone(), since: item.since });
+            item.runs.push(Run {
+                n,
+                step: CONFLICT_STEP.into(),
+                model,
+                started: Utc::now(),
+                ended: None,
+                resumed_from: None,
+                session_id: None,
+                cost_usd: None,
+                tokens: None,
+                usage: None,
+                transition: None,
+                outcome: None,
+                failed: false,
+            });
+            item.set_status(Status::Running, Some("Fixing merge conflicts".into()));
+            Ok(n)
+        })?;
+        let app = self.clone();
+        let id = id.to_string();
+        tokio::spawn(async move { app.execute(id, n).await });
+        Ok(n)
+    }
+
     /// Delivers a message from the human. Returns how it was delivered
     /// (`live`, `continue` or `note`).
     pub fn send_message(&self, id: &str, run: Option<u32>, mode: MessageMode, text: String) -> Result<&'static str> {
@@ -504,7 +551,7 @@ impl App {
                             && run
                                 .or(item.runs.last().map(|r| r.n))
                                 .and_then(|n| item.run(n))
-                                .is_some_and(|r| r.session_id.is_some())
+                                .is_some_and(|r| r.session_id.is_some() && r.step != CONFLICT_STEP)
                     })
                 };
                 if resumable {
@@ -532,6 +579,9 @@ impl App {
                 let r = item.run(n).ok_or_else(|| anyhow!("no run {n}"))?;
                 if r.session_id.is_none() {
                     bail!("run {n} has no session to resume");
+                }
+                if r.step == CONFLICT_STEP {
+                    bail!("a merge-conflict run can't be continued; press Fix conflicts again");
                 }
                 let step = r.step.clone();
                 item.enter_step(&step);
@@ -630,7 +680,11 @@ impl App {
                 self.emit_account();
             }
             for step in &pipeline.steps {
-                let mut busy = items.values().filter(|i| i.status == Status::Running && i.step == step.id).count();
+                // Merge-conflict runs don't take a step's worker slot.
+                let mut busy = items
+                    .values()
+                    .filter(|i| i.status == Status::Running && i.step == step.id && i.conflict_restore.is_none())
+                    .count();
                 let mut queue: Vec<&mut Item> = items
                     .values_mut()
                     .filter(|i| i.step == step.id && matches!(i.status, Status::Queued | Status::AwaitingApproval))
@@ -693,7 +747,11 @@ impl App {
         let pipeline = self.pipeline();
         self.running.lock().unwrap().remove(&id);
         let finish = self.update_item(&id, |item| {
-            finish_run(&self.layout, &pipeline, item, n, result);
+            if item.run(n).is_some_and(|r| r.step == CONFLICT_STEP) {
+                finish_conflict_run(&self.layout, item, n, result);
+            } else {
+                finish_run(&self.layout, &pipeline, item, n, result);
+            }
             Ok(())
         });
         if let Err(e) = finish {
@@ -705,7 +763,12 @@ impl App {
         let pipeline = self.pipeline();
         let item = self.items.lock().unwrap().get(id).cloned().ok_or_else(|| anyhow!("item vanished"))?;
         let run = item.run(n).cloned().ok_or_else(|| anyhow!("run vanished"))?;
-        let step = pipeline.step(&run.step).cloned().ok_or_else(|| anyhow!("unknown step {}", run.step))?;
+        let conflict = run.step == CONFLICT_STEP;
+        let step = if conflict {
+            pipeline.conflicts.as_step()
+        } else {
+            pipeline.step(&run.step).cloned().ok_or_else(|| anyhow!("unknown step {}", run.step))?
+        };
 
         let worktree = self.layout.worktree(id);
         let head = git::ensure_worktree(&self.layout.repo, &worktree, &item.branch, &self.layout.main)
@@ -727,7 +790,9 @@ impl App {
             .as_ref()
             .and_then(|r| item.run(r.from_run))
             .and_then(|r| r.session_id.clone());
-        let notes = item.pending_notes.clone();
+        // Notes are meant for the item's next pipeline run, so a merge-conflict
+        // run leaves them alone.
+        let notes = if conflict { vec![] } else { item.pending_notes.clone() };
 
         let system_prompt = format!(
             "{}\n\n# Step: {}\n\n{}",
@@ -736,6 +801,7 @@ impl App {
             config::read_prompt(&self.layout.data, &step.id).trim(),
         );
         let prompt = match &resume {
+            _ if conflict => conflict_prompt(&self.layout, &item, n),
             Some(r) => resume_prompt(&self.layout, &pipeline, &item, &step, n, r, &notes),
             None => initial_prompt(&self.layout, &pipeline, &item, &step, n, &notes),
         };
@@ -790,11 +856,13 @@ impl App {
         store::write_atomic(&run_dir.join("input.json"), serde_json::to_string_pretty(&input)?.as_bytes())?;
 
         // The notes and resume request are now consumed by this run.
-        self.update_item(id, |i| {
-            i.pending_notes.clear();
-            i.pending_resume = None;
-            Ok(())
-        })?;
+        if !conflict {
+            self.update_item(id, |i| {
+                i.pending_notes.clear();
+                i.pending_resume = None;
+                Ok(())
+            })?;
+        }
 
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         let (stop_tx, stop_rx) = oneshot::channel();
@@ -876,17 +944,7 @@ fn finish_run(layout: &Layout, pipeline: &Pipeline, item: &mut Item, n: u32, res
                 match parsed {
                     Some(Ok(t)) => resolve_target(pipeline, &step_id, &t),
                     Some(Err(e)) => Err(e),
-                    None => {
-                        let mut why = "Agent finished without writing transition.json".to_string();
-                        if res.is_error || res.exit.is_some() {
-                            why = format!("Agent failed ({})", res.exit.as_deref().unwrap_or("error result"));
-                        }
-                        if let Some(text) = res.result_text.filter(|t| !t.is_empty()) {
-                            let short: String = text.chars().take(300).collect();
-                            why.push_str(&format!(": {short}"));
-                        }
-                        Err(why)
-                    }
+                    None => Err(missing_transition(&res)),
                 }
             }
         }
@@ -938,6 +996,76 @@ fn finish_run(layout: &Layout, pipeline: &Pipeline, item: &mut Item, n: u32, res
             item.set_status(Status::NeedsHuman, Some(detail));
         }
     }
+}
+
+/// Why a run that wrote no transition file failed.
+fn missing_transition(res: &runner::RunResult) -> String {
+    let mut why = "Agent finished without writing transition.json".to_string();
+    if res.is_error || res.exit.is_some() {
+        why = format!("Agent failed ({})", res.exit.as_deref().unwrap_or("error result"));
+    }
+    if let Some(text) = res.result_text.as_deref().filter(|t| !t.is_empty()) {
+        let short: String = text.chars().take(300).collect();
+        why.push_str(&format!(": {short}"));
+    }
+    why
+}
+
+/// Records the outcome of a merge-conflict run and puts the item back in the
+/// status it had before the run (the run never moves the item).
+fn finish_conflict_run(layout: &Layout, item: &mut Item, n: u32, result: Result<runner::RunResult>) {
+    let parsed = std::fs::read_to_string(layout.transition_file(&item.id, n, CONFLICT_STEP))
+        .ok()
+        .map(|t| serde_json::from_str::<Transition>(&t).map_err(|e| format!("invalid transition.json: {e}")));
+    let transition = parsed.as_ref().and_then(|t| t.as_ref().ok()).cloned();
+    let summary = transition.as_ref().map(|t| t.summary.clone()).filter(|s| !s.is_empty());
+
+    let mut cost = None;
+    let mut session = None;
+    let decision: Result<(), String> = match result {
+        Err(e) => Err(format!("Agent could not run: {e:#}")),
+        Ok(res) => {
+            for text in &res.undelivered {
+                item.pending_notes.push(Note { at: Utc::now(), text: text.clone() });
+            }
+            cost = res.cost_usd;
+            session = res.session_id.clone();
+            if res.stopped {
+                Err("Stopped by the human".into())
+            } else {
+                match parsed {
+                    Some(Ok(t)) => match t.to.as_str() {
+                        "done" | "next" => Ok(()),
+                        "human" => Err("Agent asked for a human".into()),
+                        other => Err(format!("Agent chose transition '{other}' (allowed: done, human)")),
+                    },
+                    Some(Err(e)) => Err(e),
+                    None => Err(missing_transition(&res)),
+                }
+            }
+        }
+    };
+
+    if let Some(pr) = transition.as_ref().and_then(|t| t.pr_url.clone()) {
+        item.pr_url = Some(pr);
+    }
+    let outcome = match (&decision, &summary) {
+        (Ok(()), Some(s)) => format!("Conflicts fixed: {s}"),
+        (Ok(()), None) => "Conflicts fixed".to_string(),
+        (Err(why), Some(s)) if why.starts_with("Agent asked") => format!("→ human: {why}: {s}"),
+        (Err(why), _) => format!("→ human: {why}"),
+    };
+    if let Some(run) = item.run_mut(n) {
+        run.ended = Some(Utc::now());
+        run.cost_usd = cost.or(run.cost_usd);
+        if session.is_some() {
+            run.session_id = session;
+        }
+        run.failed = decision.is_err();
+        run.outcome = Some(outcome);
+        run.transition = transition;
+    }
+    item.restore_after_conflict_run();
 }
 
 fn resolve_target(pipeline: &Pipeline, from: &str, t: &Transition) -> Result<Option<String>, String> {
@@ -993,17 +1121,22 @@ fn notes_section(notes: &[Note]) -> String {
     s
 }
 
-fn initial_prompt(layout: &Layout, pipeline: &Pipeline, item: &Item, step: &Step, n: u32, notes: &[Note]) -> String {
-    let dir = layout.item_dir(&item.id);
-    let mut messages: Vec<String> = std::fs::read_dir(dir.join("messages"))
+/// The item's message files, oldest first, as a Markdown list.
+fn messages_list(layout: &Layout, item: &Item) -> String {
+    let mut messages: Vec<String> = std::fs::read_dir(layout.item_dir(&item.id).join("messages"))
         .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect())
         .unwrap_or_default();
     messages.sort();
-    let messages = if messages.is_empty() {
+    if messages.is_empty() {
         "(none yet: you are the first agent on this item)".to_string()
     } else {
         messages.iter().map(|m| format!("- `messages/{m}`")).collect::<Vec<_>>().join("\n")
-    };
+    }
+}
+
+fn initial_prompt(layout: &Layout, pipeline: &Pipeline, item: &Item, step: &Step, n: u32, notes: &[Note]) -> String {
+    let dir = layout.item_dir(&item.id);
+    let messages = messages_list(layout, item);
     let history = item
         .runs
         .iter()
@@ -1040,6 +1173,37 @@ fn initial_prompt(layout: &Layout, pipeline: &Pipeline, item: &Item, step: &Step
         history = if history.is_empty() { "(this is the first run)".into() } else { history },
         notes = notes_section(notes),
         output = output_section(layout, pipeline, item, step, n),
+    )
+}
+
+/// First message of a merge-conflict run (see `App::fix_conflicts`).
+fn conflict_prompt(layout: &Layout, item: &Item, n: u32) -> String {
+    let dir = layout.item_dir(&item.id);
+    format!(
+        "# Work item {id}: {title}\n\n\
+         - Task: fix the merge conflicts of this item's pull request (run {n}). This is not a \
+         pipeline step: the item stays where it is.\n\
+         - Pull request: {pr}\n\
+         - Main branch to merge in: `{main}`\n\
+         - Working directory: `{wt}` (git worktree, branch `{branch}`)\n\
+         - Work item folder: `{dir}`\n\
+         - Issue text: `{dir}/issue.md`\n\n\
+         ## Earlier messages (oldest first, in the work item folder)\n\n{messages}\n\n\
+         ## Your output\n\n- Message file: `{message}`\n- Transition file: `{transition}`\n\n\
+         Allowed transitions:\n\
+         - `\"done\"`: the main branch is merged in, conflicts are resolved, committed and pushed\n\
+         - `\"human\"`: stop and ask the human\n\n\
+         Start by checking `git status` in the working directory.",
+        id = item.id,
+        title = item.title,
+        pr = item.pr_url.as_deref().unwrap_or("(unknown)"),
+        main = layout.main,
+        wt = layout.worktree(&item.id).display(),
+        branch = item.branch,
+        dir = dir.display(),
+        messages = messages_list(layout, item),
+        message = layout.message_file(&item.id, n, CONFLICT_STEP).display(),
+        transition = layout.transition_file(&item.id, n, CONFLICT_STEP).display(),
     )
 }
 
@@ -1091,6 +1255,7 @@ mod tests {
             base_commit: None,
             pr_url: None,
             disk: None,
+            conflict_restore: None,
         };
         (layout, pipeline, item)
     }
@@ -1216,6 +1381,54 @@ mod tests {
         assert_eq!(item.id, "item-1");
         assert_eq!(item.branch, "claudechain/item-1");
         assert_eq!(item.next_run_number(), 1);
+    }
+
+    #[test]
+    fn conflict_run_restores_status_and_records_outcome() {
+        let (layout, _pipeline, mut item) = setup("conflict");
+        item.status = Status::Done;
+        item.status_detail = Some("opened".into());
+        item.step = "pull_request".into();
+        let since = item.since;
+        let n = item.next_run_number();
+        item.conflict_restore = Some(SavedStatus { status: item.status, detail: item.status_detail.clone(), since });
+        item.runs.push(Run {
+            n,
+            step: CONFLICT_STEP.into(),
+            model: "m".into(),
+            started: Utc::now(),
+            ended: None,
+            resumed_from: None,
+            session_id: None,
+            cost_usd: None,
+            tokens: None,
+            usage: None,
+            transition: None,
+            outcome: None,
+            failed: false,
+        });
+        item.set_status(Status::Running, None);
+        store::write_atomic(&layout.transition_file(&item.id, n, CONFLICT_STEP), br#"{"to":"done","summary":"merged"}"#).unwrap();
+        finish_conflict_run(&layout, &mut item, n, ok());
+        assert_eq!((item.status, item.step.as_str()), (Status::Done, "pull_request"));
+        assert_eq!(item.status_detail.as_deref(), Some("opened"));
+        assert_eq!(item.since, since);
+        assert!(item.conflict_restore.is_none());
+        let run = item.run(n).unwrap();
+        assert!(!run.failed && run.ended.is_some());
+        assert_eq!(run.outcome.as_deref(), Some("Conflicts fixed: merged"));
+
+        // A run asking for the human fails but still leaves the item alone.
+        let n = item.next_run_number();
+        item.conflict_restore = Some(SavedStatus { status: item.status, detail: None, since });
+        item.runs.push(Run { n, ended: None, transition: None, outcome: None, ..item.runs[0].clone() });
+        item.set_status(Status::Running, None);
+        store::write_atomic(&layout.transition_file(&item.id, n, CONFLICT_STEP), br#"{"to":"human","summary":"tricky"}"#).unwrap();
+        finish_conflict_run(&layout, &mut item, n, ok());
+        assert_eq!(item.status, Status::Done);
+        let run = item.run(n).unwrap();
+        assert!(run.failed);
+        assert_eq!(run.outcome.as_deref(), Some("→ human: Agent asked for a human: tricky"));
     }
 
     #[test]

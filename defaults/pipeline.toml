@@ -41,3 +41,11 @@ max_workers = 1
 require_approval = true
 allowed_targets = ["next", "implementation", "human"]
 tools = ["Read", "Grep", "Glob", "Bash", "Write"]
+
+# The agent behind the "Fix conflicts" button next to an item's PR link. It
+# merges the main branch into the item's branch, resolves conflicts and pushes
+# to the PR. Its prompt is prompts/merge_conflict.md.
+[conflicts]
+model = "claude-sonnet-5-5"
+# effort = "high"
+tools = ["Read", "Grep", "Glob", "Bash", "Write", "Edit"]

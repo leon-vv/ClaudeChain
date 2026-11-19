@@ -237,6 +237,19 @@ pub struct Item {
     /// periodically while the server runs.
     #[serde(default)]
     pub disk: Option<u64>,
+    /// Set while a merge-conflict run is going: the state to return to when it
+    /// ends, since that run doesn't move the item (see `config::CONFLICT_STEP`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_restore: Option<SavedStatus>,
+}
+
+/// An item's status from before a merge-conflict run started.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedStatus {
+    pub status: Status,
+    #[serde(default)]
+    pub detail: Option<String>,
+    pub since: DateTime<Utc>,
 }
 
 impl Item {
@@ -270,8 +283,18 @@ impl Item {
         self.pending_resume = None;
         self.base_commit = None;
         self.pr_url = None;
+        self.conflict_restore = None;
         self.iteration = 0;
         self.enter_step(first_step);
+    }
+
+    /// Puts back the status saved when a merge-conflict run started.
+    pub fn restore_after_conflict_run(&mut self) {
+        if let Some(saved) = self.conflict_restore.take() {
+            self.status = saved.status;
+            self.status_detail = saved.detail;
+            self.since = saved.since;
+        }
     }
 
     pub fn set_status(&mut self, status: Status, detail: Option<String>) {

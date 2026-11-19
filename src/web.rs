@@ -98,6 +98,7 @@ pub fn router(ws: Ws, allowed_hosts: Vec<String>) -> Router {
         .route("/api/items/{id}/retry", post(retry))
         .route("/api/items/{id}/restart", post(restart))
         .route("/api/items/{id}/stop", post(stop))
+        .route("/api/items/{id}/fix-conflicts", post(fix_conflicts))
         .route("/api/items/{id}/message", post(message))
         .route("/api/items/{id}/runs/{n}", get(get_run))
         .route("/api/items/{id}/files", get(list_files))
@@ -437,7 +438,7 @@ mod tests {
 }
 
 fn check_prompt_id(app: &App, id: &str) -> ApiResult<()> {
-    if id != "general" && app.pipeline().step(id).is_none() {
+    if id != "general" && id != config::CONFLICT_STEP && app.pipeline().step(id).is_none() {
         return Err(anyhow::anyhow!("unknown prompt '{id}'").into());
     }
     Ok(())
@@ -504,6 +505,12 @@ async fn stop(Cur(app): Cur, Path(id): Path<String>) -> ApiResult<Json<Value>> {
         app.emit_account();
     }
     Ok(Json(json!({})))
+}
+
+/// Starts the merge-conflict agent for the item's pull request.
+async fn fix_conflicts(Cur(app): Cur, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    let run = app.fix_conflicts(&id)?;
+    Ok(Json(json!({ "run": run })))
 }
 
 #[derive(Deserialize)]
