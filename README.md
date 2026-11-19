@@ -46,6 +46,13 @@ Options: `--repo <path>`, `--data <dir>`, `--port`, `--host`, `--claude <path>`.
   to `claude --effort`; leave it unset for Claude's default. Column headers edit
   each step's model, thinking level and prompt. Setting
   workers to 0 pauses a step.
+- **Share a pipeline**: in the pipeline editor (Edit pipeline details…),
+  **Export…** downloads the saved pipeline as one TOML file
+  (`pipeline.claudechain.toml`) with every setting, step, model and prompt,
+  including the general prompt. **Import…** loads such a file, shows each
+  step's tools and permission mode for confirmation, then replaces the pipeline
+  and all prompts. Only import files you trust: their prompts and tools decide
+  what the agents do.
 - **Click a cell** to inspect a run: live transcript, exact input, output files
   and the branch diff. From there you can chat with the agent: messages reach a
   running agent right away, and resume a finished run's session. You can also
