@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 
 use crate::account::Account;
+use crate::codex;
 use crate::config::{self, CONFLICT_STEP, Pipeline, Step};
 use crate::git;
 use crate::runner::{self, RunControl, RunSpec};
@@ -56,6 +57,8 @@ pub struct App {
     pub id: String,
     pub layout: Layout,
     pub claude: String,
+    /// The Codex CLI, for steps on OpenAI models.
+    pub codex: String,
     pub pipeline: RwLock<Pipeline>,
     pub items: Mutex<BTreeMap<String, Item>>,
     running: Mutex<HashMap<String, RunControl>>,
@@ -82,6 +85,7 @@ pub struct Agent {
 pub fn account_json(account: &Account) -> Value {
     json!({
         "limits": account.limits(),
+        "codex_limits": account.codex_limits(),
         "pause_above": account.pause_above(),
         "paused": account.paused_reason(),
         "manual_paused": account.manual_paused(),
@@ -109,6 +113,7 @@ impl App {
         id: String,
         layout: Layout,
         claude: String,
+        codex: String,
         events: broadcast::Sender<Envelope>,
         account: Arc<Account>,
     ) -> Result<Arc<Self>> {
@@ -155,6 +160,7 @@ impl App {
             id,
             layout,
             claude,
+            codex,
             pipeline: RwLock::new(pipeline),
             items: Mutex::new(items),
             running: Mutex::new(HashMap::new()),
@@ -829,42 +835,16 @@ impl App {
             None => initial_prompt(&self.layout, &pipeline, &item, &step, n, &notes),
         };
 
-        let tools = step.tools.join(",");
-        let mut args: Vec<String> = [
-            "-p",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            // Only the built-in tools: no MCP servers from the user's own config.
-            "--strict-mcp-config",
-            "--model",
-            &step.model,
-            "--permission-mode",
-            &step.permission_mode,
-            "--tools",
-            &tools,
-            "--allowedTools",
-            &tools,
-            "--append-system-prompt",
-            &system_prompt,
-            "--add-dir",
-        ]
-        .map(String::from)
-        .to_vec();
-        args.push(self.layout.item_dir(id).display().to_string());
-        if let Some(effort) = &step.effort {
-            args.push("--effort".into());
-            args.push(effort.clone());
-        }
-        if let Some(sid) = &resume_session {
-            args.push("--resume".into());
-            args.push(sid.clone());
-        }
+        let use_codex = config::is_codex_model(&step.model);
+        let (program, args) = if use_codex {
+            (self.codex.clone(), self.codex_args(id, &step, &system_prompt, resume_session.as_deref()))
+        } else {
+            (self.claude.clone(), self.claude_args(id, &step, &system_prompt, resume_session.as_deref()))
+        };
 
         let input = json!({
             "step": step.id,
+            "provider": if use_codex { "codex" } else { "claude" },
             "model": step.model,
             "effort": step.effort,
             "tools": step.tools,
@@ -874,7 +854,7 @@ impl App {
             "notes": notes,
             "system_prompt": system_prompt,
             "prompt": prompt,
-            "command": std::iter::once(self.claude.clone()).chain(args.iter().cloned()).collect::<Vec<_>>(),
+            "command": std::iter::once(program.clone()).chain(args.iter().cloned()).collect::<Vec<_>>(),
         });
         store::write_atomic(&run_dir.join("input.json"), serde_json::to_string_pretty(&input)?.as_bytes())?;
 
@@ -896,8 +876,10 @@ impl App {
             .insert(id.to_string(), RunControl { messages: msg_tx, stop: Some(stop_tx), pid: pid.clone() });
 
         let spec = RunSpec {
-            program: self.claude.clone(),
+            program,
             args,
+            codex: use_codex
+                .then(|| codex::Translator::new(&step.model, &step.permission_mode, codex::price(&step.model))),
             cwd: worktree,
             initial_prompt: prompt,
             events_path: run_dir.join("events.jsonl"),
@@ -938,6 +920,65 @@ impl App {
             app.emit(UiEvent::RunEvent { item: item_id.clone(), run: n, event: event.clone() });
         })
         .await
+    }
+
+    fn claude_args(&self, id: &str, step: &Step, system_prompt: &str, resume_session: Option<&str>) -> Vec<String> {
+        let tools = step.tools.join(",");
+        let mut args: Vec<String> = [
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            // Only the built-in tools: no MCP servers from the user's own config.
+            "--strict-mcp-config",
+            "--model",
+            &step.model,
+            "--permission-mode",
+            &step.permission_mode,
+            "--tools",
+            &tools,
+            "--allowedTools",
+            &tools,
+            "--append-system-prompt",
+            system_prompt,
+            "--add-dir",
+        ]
+        .map(String::from)
+        .to_vec();
+        args.push(self.layout.item_dir(id).display().to_string());
+        if let Some(effort) = &step.effort {
+            args.push("--effort".into());
+            args.push(effort.clone());
+        }
+        if let Some(sid) = resume_session {
+            args.push("--resume".into());
+            args.push(sid.into());
+        }
+        args
+    }
+
+    /// `codex exec` arguments. Codex has no tool allow list; the permission
+    /// mode picks the sandbox. Besides the worktree (its working directory)
+    /// the agent may write to the item folder, the repository's .git (commits
+    /// from a worktree write there) and Cargo's home (build locks, downloads).
+    fn codex_args(&self, id: &str, step: &Step, system_prompt: &str, resume_session: Option<&str>) -> Vec<String> {
+        let mut roots = vec![self.layout.item_dir(id), self.layout.repo.join(".git")];
+        if let Some(cargo) = std::env::var_os("CARGO_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cargo")))
+        {
+            roots.push(cargo);
+        }
+        codex::args(&codex::Invocation {
+            model: &step.model,
+            effort: step.effort.as_deref(),
+            permission_mode: &step.permission_mode,
+            system_prompt,
+            writable_roots: &roots,
+            resume: resume_session,
+        })
     }
 }
 

@@ -127,25 +127,44 @@ function renderPlanCard() {
   if (!box) return;
   const pause = $("#pause-above");
   if (pause && document.activeElement !== pause) pause.value = S.account?.pause_above ?? "";
+  const codex = planSource() === "codex";
   const windows = planWindows();
-  const at = S.account?.limits?.at;
-  const refresh = h("button", { class: "small", title: "Forget the recorded usage and let queued runs start. Use this after resetting your limit on claude.ai; the next run reports fresh numbers." }, "Refresh");
+  const at = planLimits()?.at;
+  const refresh = h("button", {
+    class: "small",
+    title: codex
+      ? "Read Codex's plan usage from its session logs again (they are checked every few seconds anyway)."
+      : "Forget the recorded usage and let queued runs start. Use this after resetting your limit on claude.ai; the next run reports fresh numbers.",
+  }, "Refresh");
   refresh.onclick = () => act(async () => {
-    S.account = await api("POST", "/api/limits/refresh");
+    S.account = await api("POST", codex ? "/api/limits/codex/refresh" : "/api/limits/refresh");
     renderPlan();
     renderPlanCard();
-    toast("Usage cleared; queued runs can start again");
+    toast(codex ? "Codex usage re-read" : "Usage cleared; queued runs can start again");
   });
+  const sourceBtn = (source, label) => h("button", {
+    class: `small${planSource() === source ? " primary" : ""}`,
+    title: `Show ${label}'s plan limits here and in the toolbar`,
+    onclick: () => setPlanSource(source),
+  }, label);
   box.replaceChildren(h("section", { class: "card" },
-    h("div", { class: "card-head" }, h("h2", {}, "Plan usage"), refresh),
+    h("div", { class: "card-head" },
+      h("h2", {}, "Plan usage"),
+      h("span", { class: "inline plan-source" }, sourceBtn("claude", "Claude"), sourceBtn("codex", "Codex")),
+      refresh),
     S.account?.paused ? h("div", { class: "banner warn" }, `⏸ New runs are paused: ${S.account.paused}`) : "",
     windows.length
       ? h("div", { class: "windows" }, windows.map((w) => h("div", { class: "window" },
           h("div", { class: "window-head" }, h("b", {}, `${w.name[0].toUpperCase()}${w.name.slice(1)} limit`), h("span", { class: "big" }, `${w.pct}%`)),
           meter(w.pct, "wide"),
           h("div", { class: "muted" }, w.resets ? `resets in ${fmtUntil(w.resets)} (${w.resets.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })})` : ""))))
-      : h("p", { class: "muted" }, "No plan usage reported yet. Claude Code reports it with each agent run, so it appears after the next run."),
-    at ? h("p", { class: "muted small" }, `As of ${new Date(at).toLocaleTimeString()}, from the latest agent run. Usage from other Claude sessions counts too.`) : "",
+      : h("p", { class: "muted" }, codex
+          ? "No Codex plan usage found yet. Codex writes it to its session logs (~/.codex/sessions) during each run, so it appears after the next Codex run."
+          : "No plan usage reported yet. Claude Code reports it with each agent run, so it appears after the next run."),
+    at ? h("p", { class: "muted small" }, codex
+      ? `As of ${new Date(at).toLocaleTimeString()}, from Codex's latest session log. Usage from other Codex sessions counts too.${planLimits()?.info?.plan ? ` Plan: ${planLimits().info.plan}.` : ""}`
+      : `As of ${new Date(at).toLocaleTimeString()}, from the latest agent run. Usage from other Claude sessions counts too.`) : "",
+    codex ? h("p", { class: "muted small" }, "Auto-pause looks at Claude's limits only. Costs of Codex runs are estimated from OpenAI's API prices.") : "",
   ));
 }
 
@@ -233,7 +252,7 @@ function renderTokens() {
         return row(h("a", { href: "#", onclick: (e) => { e.preventDefault(); showPage("board"); openInspector(k, it?.runs.at(-1)?.n); } }, it?.title || k), t);
       }))),
     ),
-    h("p", { class: "muted small" }, "Total tokens = input + output. Input includes cache reads and cache writes; Cached = cache reads, shown as a share of input. As reported by Claude Code. Cache reads are much cheaper than other input and count less toward plan limits."),
+    h("p", { class: "muted small" }, "Total tokens = input + output. Input includes cache reads and cache writes; Cached = cache reads, shown as a share of input. As reported by Claude Code or Codex (Codex costs are estimated from OpenAI's API prices). Cache reads are much cheaper than other input and count less toward plan limits."),
   ));
 }
 

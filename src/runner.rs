@@ -1,5 +1,6 @@
 //! Runs one agent as a `claude -p` child process speaking stream-json on
-//! stdin and stdout.
+//! stdin and stdout, or as a `codex exec --json` process whose events are
+//! translated to the same shapes (see `codex`).
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -12,6 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::codex;
 use crate::reaper;
 
 pub struct RunSpec {
@@ -23,6 +25,9 @@ pub struct RunSpec {
     pub stderr_path: PathBuf,
     /// Set to the child's process id once it has started.
     pub pid: Arc<AtomicU32>,
+    /// Set for Codex runs: the prompt goes to stdin as plain text, stdin is
+    /// then closed, and the events are translated.
+    pub codex: Option<codex::Translator>,
 }
 
 /// Handle the orchestrator keeps for a running agent.
@@ -64,6 +69,7 @@ pub(crate) fn scrub_env(cmd: &mut Command) {
         if k.starts_with("ANTHROPIC_")
             || k == "CLAUDECODE"
             || k.starts_with("CLAUDE_CODE_")
+            || matches!(&*k, "OPENAI_API_KEY" | "OPENAI_BASE_URL" | "CODEX_API_KEY")
             || from_cargo_run(&k)
         {
             cmd.env_remove(&key);
@@ -146,10 +152,19 @@ pub async fn run(
         on_event(value);
     };
 
+    let mut translator = spec.codex;
     if let Some(w) = stdin.as_mut() {
-        w.write_all(user_message(&spec.initial_prompt).as_bytes()).await?;
-        w.write_all(b"\n").await?;
+        if translator.is_some() {
+            w.write_all(spec.initial_prompt.as_bytes()).await?;
+        } else {
+            w.write_all(user_message(&spec.initial_prompt).as_bytes()).await?;
+            w.write_all(b"\n").await?;
+        }
         w.flush().await?;
+    }
+    if translator.is_some() {
+        // Codex reads the prompt until EOF and takes no further input.
+        stdin = None;
     }
 
     let mut result = RunResult::default();
@@ -160,26 +175,39 @@ pub async fn run(
                 let Some(line) = line? else { break };
                 let value: Value = serde_json::from_str(&line)
                     .unwrap_or_else(|_| local_event("raw_output", &line));
-                if result.session_id.is_none()
-                    && let Some(id) = value.get("session_id").and_then(Value::as_str) {
-                        result.session_id = Some(id.to_string());
-                    }
-                if value["type"] == "result" {
-                    result.cost_usd = value["total_cost_usd"].as_f64();
-                    result.result_text = value["result"].as_str().map(String::from);
-                    result.is_error = value["is_error"].as_bool().unwrap_or(false);
-                    // The turn is over: closing stdin lets the CLI exit.
-                    // Messages arriving after this need a resumed session.
-                    stdin = None;
+                // Codex events are logged raw, followed by their translation.
+                let mut batch = vec![(line, value)];
+                if let Some(t) = translator.as_mut() {
+                    let translated = t.translate(&batch[0].1);
+                    batch.extend(translated.into_iter().map(|ev| (ev.to_string(), ev)));
                 }
-                log(&mut events, &line, &value).await;
+                for (line, value) in batch {
+                    if result.session_id.is_none()
+                        && let Some(id) = value.get("session_id").and_then(Value::as_str) {
+                            result.session_id = Some(id.to_string());
+                        }
+                    if value["type"] == "result" {
+                        result.cost_usd = value["total_cost_usd"].as_f64();
+                        result.result_text = value["result"].as_str().map(String::from);
+                        result.is_error = value["is_error"].as_bool().unwrap_or(false);
+                        // The turn is over: closing stdin lets the CLI exit.
+                        // Messages arriving after this need a resumed session.
+                        stdin = None;
+                    }
+                    log(&mut events, &line, &value).await;
+                }
             }
             msg = messages.recv(), if messages_open => {
                 match msg {
                     Some(text) => {
                         let Some(w) = stdin.as_mut() else {
+                            let why = if translator.is_some() {
+                                "Codex can't take messages during a run"
+                            } else {
+                                "The agent already finished its turn"
+                            };
                             let ev = local_event("human_message_dropped", &format!(
-                                "The agent already finished its turn; this message is kept for the next run: {text}"));
+                                "{why}; this message is kept for the next run: {text}"));
                             log(&mut events, &ev.to_string(), &ev).await;
                             result.undelivered.push(text);
                             continue;

@@ -93,6 +93,26 @@ that no tab shows keep running their agents until the server stops.
 | `--claude <path>`  | Path to the `claude` CLI                       |
 | `--codex <path>`   | Path to the `codex` CLI                        |
 
+### OpenAI models (Codex)
+
+Steps whose model is an OpenAI model (`gpt-*`, `o3`, `o4-mini`, anything with
+`codex`) run through the [Codex CLI](https://github.com/openai/codex)
+(`codex exec --json`, logged in; `--codex <path>` to point at it) instead of
+Claude Code. Add the model ids to the pipeline's model list to pick them.
+Differences: Codex has no tool allow list, so the permission mode picks its
+sandbox (`plan` → read-only, `bypassPermissions` → full access, otherwise
+workspace-write with network, plus the item folder, the repository's `.git`
+and `~/.cargo`). The user's `~/.codex/config.toml` is ignored (no plugins or
+MCP servers). Messages sent while a Codex agent runs are kept for its next
+run. Codex's 5-hour and weekly limits are read from its session logs
+(`~/.codex/sessions`); the switch next to "Plan usage" on the Resources page
+picks whether that page and the toolbar show Claude's or Codex's limits
+(auto-pause uses Claude's). Codex reports no cost: the API-equivalent cost of Codex
+runs is estimated from a built-in table of OpenAI API prices (`codex::price`;
+cache writes at the 30-minute price; unknown models show no cost). Token counts are split into uncached input, cached input and
+output like Claude's. Pipeline generation still uses
+Claude.
+
 ## How it works
 
 ### Runs and transitions

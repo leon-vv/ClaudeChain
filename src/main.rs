@@ -1,4 +1,5 @@
 mod account;
+mod codex;
 mod config;
 mod generate;
 mod git;
@@ -18,7 +19,7 @@ use clap::Parser;
 
 use crate::workspace::Workspace;
 
-/// Web UI that runs GitHub issues through a pipeline of Claude agents.
+/// Web UI that runs GitHub issues through a pipeline of Claude (and Codex) agents.
 #[derive(Parser)]
 #[command(version)]
 struct Args {
@@ -37,6 +38,9 @@ struct Args {
     /// The Claude Code CLI to run agents with.
     #[arg(long, default_value = "claude")]
     claude: String,
+    /// The Codex CLI to run agents on OpenAI models (gpt-*, o*, *codex*) with.
+    #[arg(long, default_value = "codex")]
+    codex: String,
 }
 
 #[tokio::main]
@@ -48,7 +52,7 @@ async fn main() -> Result<()> {
         .init();
     let args = Args::parse();
 
-    let ws = Workspace::new(args.claude);
+    let ws = Workspace::new(args.claude, args.codex);
     tokio::spawn(ws.clone().monitor_loop());
     let initial = match args.repo {
         Some(repo) => Some((repo, args.data)),

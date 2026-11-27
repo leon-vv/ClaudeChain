@@ -93,6 +93,7 @@ pub fn router(ws: Ws, allowed_hosts: Vec<String>) -> Router {
         .route("/api/limits", put(put_limits))
         .route("/api/pause", put(put_pause))
         .route("/api/limits/refresh", post(refresh_limits))
+        .route("/api/limits/codex/refresh", post(refresh_codex_limits))
         .route("/api/pipeline", put(put_pipeline))
         .route("/api/pipeline/export", get(export_pipeline))
         .route("/api/pipeline/import", post(import_pipeline))
@@ -289,6 +290,15 @@ async fn put_limits(State(ws): State<Ws>, Json(l): Json<LimitSettings>) -> ApiRe
     ws.account.set_pause_above(l.pause_above);
     let account = orchestrator::account_json(&ws.account);
     let _ = ws.events.send(orchestrator::Envelope::global(orchestrator::UiEvent::Limits { account: account.clone() }));
+    Ok(Json(account))
+}
+
+/// Reads Codex's plan usage from its session logs again.
+async fn refresh_codex_limits(State(ws): State<Ws>) -> ApiResult<Json<Value>> {
+    let w = ws.clone();
+    let _ = tokio::task::spawn_blocking(move || w.refresh_codex_limits()).await;
+    let account = orchestrator::account_json(&ws.account);
+    ws.emit_limits();
     Ok(Json(account))
 }
 

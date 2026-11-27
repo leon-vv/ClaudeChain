@@ -600,7 +600,7 @@ mod tests {
 
     #[tokio::test]
     async fn json_rpc_dispatch() {
-        let ws = Workspace::new("claude".into());
+        let ws = Workspace::new("claude".into(), "codex".into());
         let init = dispatch(&ws, json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"protocolVersion": "2025-03-26"}}))
         .await
