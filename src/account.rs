@@ -1,6 +1,6 @@
 //! State that belongs to the user rather than to one repository: recently
-//! opened repositories, the latest plan usage reported by Claude Code, and the
-//! threshold above which no new agent runs are started. Stored in
+//! opened repositories, the latest plan usage reported by Claude Code and by
+//! Codex, and the threshold above which no new agent runs are started. Stored in
 //! `~/.config/claudechain/state.json`.
 
 use std::path::PathBuf;
@@ -43,6 +43,10 @@ struct Saved {
     /// Set by the human from the toolbar: no new runs start until cleared.
     #[serde(default)]
     manual_pause: bool,
+    /// Latest Codex plan usage (from its session logs), in the same
+    /// `unifiedWindows` shape as `limits`.
+    #[serde(default)]
+    codex_limits: Option<Limits>,
 }
 
 pub struct Account {
@@ -110,6 +114,29 @@ impl Account {
             Self::save(&saved);
         }
         changed
+    }
+
+    pub fn codex_limits(&self) -> Option<Limits> {
+        self.saved.lock().unwrap().codex_limits.clone()
+    }
+
+    /// Records Codex usage reported at `at`; returns true when it is newer
+    /// than the recorded one (older readings, e.g. from an older session
+    /// log, are ignored).
+    pub fn record_codex_limits(&self, at: DateTime<Utc>, info: Value) -> bool {
+        let mut saved = self.saved.lock().unwrap();
+        if saved.codex_limits.as_ref().is_some_and(|l| l.at >= at) {
+            return false;
+        }
+        saved.codex_limits = Some(Limits { at, info });
+        Self::save(&saved);
+        true
+    }
+
+    pub fn forget_codex_limits(&self) {
+        let mut saved = self.saved.lock().unwrap();
+        saved.codex_limits = None;
+        Self::save(&saved);
     }
 
     /// Forgets the recorded usage, e.g. after the user reset their limit

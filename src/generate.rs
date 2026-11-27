@@ -137,6 +137,9 @@ pub async fn generate(claude: &str, cwd: &Path, model: &str, request: &str, mode
     if model.trim().is_empty() {
         bail!("choose a model");
     }
+    if crate::config::is_codex_model(model) {
+        bail!("pipeline generation runs on Claude: choose a Claude model");
+    }
     let system = system_prompt(models);
     let first = ask(claude, cwd, model, &system, request).await?;
     let err = match parse(&first, models) {

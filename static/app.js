@@ -99,9 +99,23 @@ const tokTitle = (t) => {
   return `read ${n(p.read)}: uncached ${n(p.uncached)} · cached ${n(p.cached)}\nwrite ${n(p.write)}: output ${n(p.output)} · cache write ${n(p.cacheWrite)}`;
 };
 
-/// Plan windows from the latest rate_limit_event, ignoring ones that already reset.
+/// Whose plan usage the toolbar and the Resources page show: "claude" or
+/// "codex". Chosen on the Resources page; remembered in this browser.
+function planSource() {
+  return localStorage.getItem("planSource") === "codex" ? "codex" : "claude";
+}
+function setPlanSource(source) {
+  localStorage.setItem("planSource", source);
+  renderPlan();
+  if (typeof renderPlanCard === "function") renderPlanCard();
+}
+const planLimits = () => (planSource() === "codex" ? S.account?.codex_limits : S.account?.limits);
+const planSourceName = () => (planSource() === "codex" ? "Codex" : "Claude");
+
+/// Plan windows of the chosen source (Claude's latest rate_limit_event or
+/// Codex's session logs), ignoring ones that already reset.
 function planWindows() {
-  const w = S.account?.limits?.info?.unifiedWindows || {};
+  const w = planLimits()?.info?.unifiedWindows || {};
   const now = Date.now() / 1000;
   return Object.entries(w).map(([key, v]) => ({
     key,
@@ -130,13 +144,14 @@ function renderPlan() {
   el.classList.toggle("paused", !!S.account?.paused);
   el.replaceChildren(...[
     S.account?.paused && h("span", { class: "plan-paused" }, "⏸ paused"),
+    windows.length && h("span", { class: "plan-label" }, planSourceName()),
     ...windows.map((w) => h("span", { class: "plan-win" },
       h("span", { class: "plan-label" }, w.short),
       h("span", { class: "meter" }, h("span", { class: `fill ${levelClass(w.pct)}`, style: `width:${w.pct}%` })),
       `${w.pct}%`)),
   ].filter(Boolean));
   el.title = [
-    ...windows.map((w) => `${w.name} limit: ${w.pct}% used, resets in ${fmtUntil(w.resets)}`),
+    ...windows.map((w) => `${planSourceName()} ${w.name} limit: ${w.pct}% used, resets in ${fmtUntil(w.resets)}`),
     S.account?.paused ? `New runs paused: ${S.account.paused}` : null,
     "Click for details",
   ].filter(Boolean).join("\n");
@@ -828,7 +843,7 @@ function appendTranscriptEvent(ev, initial = false) {
     case "assistant":
       for (const block of ev.message?.content || []) {
         if (block.type === "text" && block.text?.trim()) {
-          add(h("div", { class: "ev assistant" }, h("div", { class: "who" }, "Claude"), h("div", { class: "body" }, block.text)));
+          add(h("div", { class: "ev assistant" }, h("div", { class: "who" }, ev.source === "codex" ? "Codex" : "Claude"), h("div", { class: "body" }, block.text)));
         } else if (block.type === "thinking" && block.thinking?.trim()) {
           add(h("details", { class: "fold ev" }, h("summary", {}, "thinking"), h("pre", {}, block.thinking)));
         } else if (block.type === "tool_use") {
@@ -892,6 +907,7 @@ function renderInput(body, d) {
   body.append(
     kv([
       ["Model", i.model],
+      ["Runs on", i.provider === "codex" ? "Codex CLI" : i.provider && "Claude Code"],
       ["Effort", i.effort],
       ["Step", stepName(i.step)],
       ["Tools", (i.tools || []).join(", ")],
@@ -1259,10 +1275,19 @@ function presetPicker(onPick) {
 
 // Small modal on top of the pipeline dialog: the user describes a pipeline and picks a
 // model; Claude returns the steps (with a prompt each). Calls onDone(generated).
+// Same rule as config::is_codex_model: OpenAI models run through the Codex CLI.
+function isCodexModel(m) {
+  const s = m.trim().toLowerCase();
+  return s.startsWith("gpt") || s.includes("codex") || /^o\d/.test(s);
+}
+
 function generatorDialog(models, onDone) {
   const ta = h("textarea", { rows: 5, placeholder: "e.g. Create an electronics pipeline: requirements, schematic design, part selection, PCB layout review and ordering after my approval" });
-  const preferred = models.find((m) => m.includes("opus")) ?? models[0];
-  const sel = h("select", {}, models.map((m) => h("option", { value: m, selected: m === preferred }, m)));
+  // Generation runs on Claude Code, so only Claude models are offered.
+  const filtered = models.filter((m) => !isCodexModel(m));
+  const choices = filtered.length ? filtered : models;
+  const preferred = choices.find((m) => m.includes("opus")) ?? choices[0];
+  const sel = h("select", {}, choices.map((m) => h("option", { value: m, selected: m === preferred }, m)));
   const err = h("p", { class: "error" });
   const go = h("button", { class: "primary" }, "Generate");
   const cancel = h("button", { onclick: () => dlg.close() }, "Cancel");

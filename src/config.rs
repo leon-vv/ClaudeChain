@@ -110,12 +110,30 @@ fn default_permission_mode() -> String {
     "dontAsk".into()
 }
 fn default_models() -> Vec<String> {
-    ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]
+    [
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "claude-fable-5-1",
+        "gpt-6.2-sol",
+        "gpt-6.2-astra",
+        "gpt-6-luna",
+    ]
         .map(String::from)
         .to_vec()
 }
 
-/// Accepted values for `Step::effort` (`claude --effort`).
+/// Whether `model` is an OpenAI model, run with the Codex CLI instead of
+/// Claude Code: gpt-*, o<digit>* (o3, o4-mini) and anything with "codex".
+pub fn is_codex_model(model: &str) -> bool {
+    let m = model.trim().to_ascii_lowercase();
+    m.starts_with("gpt")
+        || m.contains("codex")
+        || m.strip_prefix('o').is_some_and(|r| r.starts_with(|c: char| c.is_ascii_digit()))
+}
+
+/// Accepted values for `Step::effort` (`claude --effort`, or Codex's
+/// `model_reasoning_effort` for OpenAI models).
 pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 const DEFAULT_PIPELINE: &str = include_str!("../defaults/pipeline.toml");
@@ -338,6 +356,16 @@ pub fn parse_bundle(text: &str) -> Result<Bundle> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_models_are_recognized() {
+        for m in ["gpt-6.2-sol", "o3", "o4-mini", "gpt-5-codex", "codex-mini-latest"] {
+            assert!(is_codex_model(m), "{m}");
+        }
+        for m in ["claude-opus-5-5", "opus", "claude-haiku-5-5"] {
+            assert!(!is_codex_model(m), "{m}");
+        }
+    }
 
     #[test]
     fn default_pipeline_is_valid_and_has_four_steps() {

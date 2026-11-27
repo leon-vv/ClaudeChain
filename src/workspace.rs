@@ -10,7 +10,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,7 @@ use crate::sysmon::Monitor;
 
 pub struct Workspace {
     claude: String,
+    codex: String,
     pub events: broadcast::Sender<Envelope>,
     /// Open repositories by id.
     apps: RwLock<BTreeMap<String, Arc<App>>>,
@@ -33,6 +35,8 @@ pub struct Workspace {
     switching: tokio::sync::Mutex<()>,
     pub account: Arc<Account>,
     pub monitor: Monitor,
+    /// The Codex session log last read for plan usage, and its mtime.
+    codex_log: Mutex<Option<(PathBuf, SystemTime)>>,
 }
 
 /// An open repository, as listed to the UI.
@@ -153,23 +157,63 @@ pub fn repo_id(repo: &Path, data: &Path) -> String {
 }
 
 impl Workspace {
-    pub fn new(claude: String) -> Arc<Self> {
+    pub fn new(claude: String, codex: String) -> Arc<Self> {
         let (events, _) = broadcast::channel(4096);
         Arc::new(Self {
             claude,
+            codex,
             events,
             apps: RwLock::new(BTreeMap::new()),
             default: RwLock::new(None),
             switching: tokio::sync::Mutex::new(()),
             account: Account::load(),
             monitor: Monitor::new(),
+            codex_log: Mutex::new(None),
         })
+    }
+
+    /// Reads Codex's plan usage from its newest session log if that changed
+    /// since the last call, and tells the UI when it is newer.
+    pub fn poll_codex_limits(&self) {
+        let Some(newest) = crate::codex::newest_rollout() else { return };
+        {
+            let mut last = self.codex_log.lock().unwrap();
+            if last.as_ref() == Some(&newest) {
+                return;
+            }
+            *last = Some(newest.clone());
+        }
+        let Some((at, info)) = crate::codex::read_limits(&newest.0) else { return };
+        if self.account.record_codex_limits(at, info) {
+            self.emit_limits();
+        }
+    }
+
+    /// Re-reads Codex's plan usage from scratch.
+    pub fn refresh_codex_limits(&self) {
+        self.account.forget_codex_limits();
+        *self.codex_log.lock().unwrap() = None;
+        self.poll_codex_limits();
+    }
+
+    /// Sends the account state (limits, pause) to every tab.
+    pub fn emit_limits(&self) {
+        let account = crate::orchestrator::account_json(&self.account);
+        let _ = self.events.send(crate::orchestrator::Envelope::global(crate::orchestrator::UiEvent::Limits { account }));
     }
 
     /// Samples system resources forever (for the Resources page).
     pub async fn monitor_loop(self: Arc<Self>) {
         let mut last_disk: Option<std::time::Instant> = None;
+        let mut tick: u64 = 0;
         loop {
+            // Codex reports plan usage only in its session logs; check them
+            // every few ticks (cheap when nothing changed).
+            if tick.is_multiple_of(5) {
+                let ws = self.clone();
+                let _ = tokio::task::spawn_blocking(move || ws.poll_codex_limits()).await;
+            }
+            tick += 1;
             let apps = self.apps();
             let disk = self.app(None).or_else(|| apps.first().cloned()).map(|a| a.layout.data.clone());
             let ws = self.clone();
@@ -344,7 +388,7 @@ impl Workspace {
         if let Some(old) = &existing {
             old.close()?;
         }
-        let app = App::new(id.clone(), layout, self.claude.clone(), self.events.clone(), self.account.clone())?;
+        let app = App::new(id.clone(), layout, self.claude.clone(), self.codex.clone(), self.events.clone(), self.account.clone())?;
         tokio::spawn(app.clone().scheduler());
         self.apps.write().unwrap().insert(id.clone(), app);
         tracing::info!("opened repo {} (data {}, main branch {main}, id {id})", repo.display(), data.display());
