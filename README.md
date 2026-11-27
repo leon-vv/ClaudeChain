@@ -28,8 +28,8 @@ into short, focused runs, which lowers cost and keeps quality predictable:
 - **Better prompt caching.** All runs of a step share the same general prompt,
   step prompt and tool set, so the start of each request is identical across
   tasks and is served from the prompt cache.
-- **Minimal tool surface.** Steps receive only the tools they need, and your
-  personal MCP servers are not loaded, which keeps tool definitions out of the
+- **Minimal tool surface.** Steps receive only the tools they need (Codex
+  steps get a sandbox instead), and your personal MCP servers are not loaded, which keeps tool definitions out of the
   context and limits what each agent can do.
 - **Bounded loops.** Steps may send work back for another iteration, but a
   per-pipeline `max_iterations` limit hands the task to a human instead of
@@ -97,21 +97,30 @@ that no tab shows keep running their agents until the server stops.
 
 Steps whose model is an OpenAI model (`gpt-*`, `o3`, `o4-mini`, anything with
 `codex`) run through the [Codex CLI](https://github.com/openai/codex)
-(`codex exec --json`, logged in; `--codex <path>` to point at it) instead of
-Claude Code. Add the model ids to the pipeline's model list to pick them.
-Differences: Codex has no tool allow list, so the permission mode picks its
-sandbox (`plan` → read-only, `bypassPermissions` → full access, otherwise
-workspace-write with network, plus the item folder, the repository's `.git`
-and `~/.cargo`). The user's `~/.codex/config.toml` is ignored (no plugins or
-MCP servers). Messages sent while a Codex agent runs are kept for its next
-run. Codex's 5-hour and weekly limits are read from its session logs
-(`~/.codex/sessions`); the switch next to "Plan usage" on the Resources page
-picks whether that page and the toolbar show Claude's or Codex's limits
-(auto-pause uses Claude's). Codex reports no cost: the API-equivalent cost of Codex
-runs is estimated from a built-in table of OpenAI API prices (`codex::price`;
-cache writes at the 30-minute price; unknown models show no cost). Token counts are split into uncached input, cached input and
-output like Claude's. Pipeline generation still uses
-Claude.
+(`codex exec --json`) instead of Claude Code. Codex must be installed and logged
+in; use `--codex <path>` if it is not on your `PATH`. To use a model, add its id
+to the pipeline's model list.
+
+Codex runs differ from Claude runs in a few ways:
+
+- **Permissions.** Codex has no per-tool allow list, so the step's permission
+  mode picks a sandbox instead: `plan` is read-only, `bypassPermissions` has
+  full access, and every other mode is workspace-write with network access.
+  Workspace-write can also write to the item folder, the repository's `.git`
+  and `~/.cargo`.
+- **Configuration.** Your `~/.codex/config.toml` is ignored, so no plugins or
+  MCP servers are loaded.
+- **Messages.** Messages sent while a Codex agent runs are kept for its next
+  run.
+- **Limits.** Codex's 5-hour and weekly limits are read from its session logs
+  (`~/.codex/sessions`). The switch next to "Plan usage" on the Resources page
+  chooses whether that page and the toolbar show Claude's or Codex's limits.
+  Auto-pause always uses Claude's.
+- **Cost.** Codex reports no cost. The API-equivalent cost is estimated from a
+  built-in table of OpenAI API prices (`codex::price`), with cache writes at
+  the 30-minute price. Models missing from the table show no cost. Token counts
+  are split into uncached input, cached input and output, as for Claude.
+- **Pipeline generation** always uses Claude.
 
 ## How it works
 
@@ -182,8 +191,10 @@ change, so other websites cannot drive it from your browser. To use it from
 another machine, prefer an SSH tunnel (`ssh -L 7878:127.0.0.1:7878 host`) over
 `--host 0.0.0.0`.
 
-Agents run with the permission mode configured per step (default `dontAsk`)
-and only the tools granted to that step. Only import pipeline files you trust:
+Agents run with the permission mode configured per step (default `dontAsk`).
+Claude agents get only the tools granted to that step. Codex agents have no
+tool list: they run in a sandbox chosen by the permission mode, and in the
+default workspace-write sandbox they can use the network. Only import pipeline files you trust:
 their prompts and tools determine what the agents do.
 
 ## License

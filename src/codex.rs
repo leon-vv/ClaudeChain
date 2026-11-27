@@ -44,8 +44,9 @@ impl Price {
 /// runs. Where no cached-input or cache-write price exists the input price is
 /// used. None for unknown models (their runs show no cost).
 pub fn price(model: &str) -> Option<Price> {
-    // (model, input, output, cached input, 30-minute cache write)
-    const PRICES: &[(&str, f64, f64, Option<f64>, Option<f64>)] = &[
+    /// (model, input, output, cached input, 30-minute cache write)
+    type Row = (&'static str, f64, f64, Option<f64>, Option<f64>);
+    const PRICES: &[Row] = &[
         ("gpt-6.2-astra", 8.00, 40.00, Some(0.40), Some(10.00)),
         ("gpt-6.2-sol", 2.00, 10.00, Some(0.10), Some(2.50)),
         ("gpt-6-astra", 10.00, 50.00, Some(1.00), Some(12.50)),

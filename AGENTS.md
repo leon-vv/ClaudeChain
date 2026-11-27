@@ -8,8 +8,9 @@ the product does. This file covers how to work on the code.
 
 ClaudeChain is a single Rust binary (axum + tokio) that serves a local web UI at
 http://127.0.0.1:7878. It runs work items (GitHub issues or plain-text tasks)
-through a configurable pipeline of agent steps. Each step is a separate
-`claude -p` child process, running in a git worktree for that item. Agents
+through a configurable pipeline of agent steps. Each step run is a separate
+agent process in a git worktree for that item: `claude -p` for Claude models,
+or `codex exec --json` for OpenAI models (`config::is_codex_model`). Agents
 communicate only through files; each run ends by writing a message file and a
 `transition.json` that tells the orchestrator where the item goes next.
 
@@ -38,9 +39,12 @@ src/
   main.rs          CLI args (clap), starts Workspace and the web server
   workspace.rs     open repositories and their pipelines (one App per data dir)
   orchestrator.rs  App: owns pipeline, items and running agents; the scheduler
-                   loop, transitions, builds the `claude` command line
+                   loop, transitions, builds the `claude` / `codex` command line
   runner.rs        runs one agent: spawns the CLI, stream-json in/out, writes
                    events.jsonl, strips environment variables
+  codex.rs         Codex support: `codex exec` arguments, translation of Codex
+                   events into Claude stream-json, OpenAI prices, Codex plan
+                   limits read from ~/.codex/sessions
   reaper.rs        kills every process an agent started (Linux, via /proc)
   store.rs         on-disk types (Item, Run, Transition, ...) and atomic writes
   config.rs        pipeline.toml (Pipeline, Step), prompts, export/import bundle
@@ -81,11 +85,12 @@ Changes in these areas need extra care. Don't weaken them without being asked to
   requires an `X-ClaudeChain` header on every request other than GET/HEAD
   (`guard`). Add new routes inside `router()` so the guard covers them, and
   never let a GET handler change state. `/mcp` goes through the same guard.
-- **Agent environment (`src/runner.rs`).** The runner removes `ANTHROPIC_*`,
-  `CLAUDECODE`, `CLAUDE_CODE_*` and the variables that `cargo run` and rustup
-  set, so agents use the subscription login and the worktree's own toolchain.
-  Agents get `--strict-mcp-config` so the user's personal MCP servers are not
-  loaded.
+- **Agent environment (`runner::scrub_env`).** The runner removes
+  `ANTHROPIC_*`, `CLAUDECODE`, `CLAUDE_CODE_*`, `OPENAI_API_KEY`,
+  `OPENAI_BASE_URL`, `CODEX_API_KEY` and the variables that `cargo run` and
+  rustup set. Agents use the CLI's own login and the worktree's own toolchain.
+  The user's personal MCP servers and plugins are not loaded:
+  `--strict-mcp-config` for Claude, `--ignore-user-config` for Codex.
 - **Process cleanup (`src/reaper.rs`).** Every agent gets a marker environment
   variable, and all processes that carry it are killed when the run ends. New
   ways of spawning agents must keep the marker and the reaper.
@@ -100,6 +105,15 @@ Changes in these areas need extra care. Don't weaken them without being asked to
 - **Git.** Item branches are `claudechain/<id>` (or `claudechain/<folder>-<id>`
   for pipelines other than the first) and start from the local main branch,
   not from HEAD (`git::ensure_worktree`).
+- **Two agent backends.** Everything above the runner (transcripts, token
+  meter, UI) works on Claude stream-json events. `codex::Translator` turns
+  Codex events into that shape, and the raw events are kept next to them in
+  events.jsonl. A feature that depends on agent events or CLI flags must work
+  for both, or handle Codex explicitly. How Codex differs: it has no per-tool
+  allow list (the step's permission mode picks a sandbox, `codex::sandbox`),
+  it can't take messages mid-run (they are kept for the next run), and it
+  reports no cost (estimated from `codex::price`). When you add an OpenAI
+  model to `defaults/pipeline.toml`, add its price there too.
 - **Transition protocol.** The JSON shape of `transition.json` and the rules in
   `defaults/prompts/general.md` are a contract with every agent prompt. If you
   change one, update the other.
@@ -118,7 +132,8 @@ built-in prompt needs an entry in the `include_str!` table in `src/config.rs`.
 - Tests are inline `#[cfg(test)] mod tests` blocks in the module they test.
   Add tests next to the code you change.
 - Git tests create throwaway repositories in a temp directory. Tests must not
-  call the real `claude` or `gh` CLIs or touch the network.
+  call the real `claude`, `codex` or `gh` CLIs or touch the network. Codex
+  event translation is tested on recorded JSON events in `codex::tests`.
 - For UI changes, `cargo test` is not enough. Run the server
   (`cargo run -- --port 7879` if 7878 is in use), open it in a browser, and
   check the change. Look at the browser console for errors.
@@ -149,10 +164,3 @@ describes the codebase. Work only in your worktree.
 - Update `README.md` when you change behaviour users can see: CLI options, the
   data layout, MCP tools, requirements or security behaviour.
 
-## Known gaps
-
-- `README.md` already describes Codex CLI support (a `--codex` option and
-  routing OpenAI models to `codex`), but on `main` the runner only drives
-  `claude`. The Codex work is in progress on the `claudechain/item-10` branch
-  (`src/codex.rs`). Until that is merged, don't assume Codex support exists on
-  `main`. Remove this section once it is merged.
