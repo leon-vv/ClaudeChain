@@ -52,7 +52,6 @@ src/
   sysmon.rs        Resources page: CPU, memory, disk, temperatures (Linux)
 static/            index.html, app.js (board, inspector, editor), resources.js, style.css
 defaults/          pipeline.toml and prompts written into a new data directory
-PLAN.md            original design sketch; historical, do not update it
 ```
 
 ## Conventions
@@ -152,8 +151,8 @@ describes the codebase. Work only in your worktree.
 
 ## Known gaps
 
-- `README.md` describes Codex CLI support (a `--codex` option and routing
-  `gpt-*`/`o3` models to `codex`), but the code does not implement it yet.
-  `src/main.rs` has only `--claude`, and the command line in
-  `src/orchestrator.rs` is built for `claude` only. Don't assume the Codex
-  support exists. Implement it or fix the README if the task calls for it.
+- `README.md` already describes Codex CLI support (a `--codex` option and
+  routing OpenAI models to `codex`), but on `main` the runner only drives
+  `claude`. The Codex work is in progress on the `claudechain/item-10` branch
+  (`src/codex.rs`). Until that is merged, don't assume Codex support exists on
+  `main`. Remove this section once it is merged.
